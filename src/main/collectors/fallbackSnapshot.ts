@@ -33,9 +33,9 @@ export function createFallbackSnapshot(now = Date.now()): RawSnapshot {
     {
       id: 'profile',
       label: 'Active Profile',
-      value: 'Default Profile',
-      detail: 'Local profile',
-      tone: 'purple'
+      value: UNAVAILABLE,
+      detail: 'Telemetry unavailable',
+      tone: 'slate'
     }
   ];
 

@@ -2,7 +2,7 @@ import type { ComponentType, ReactNode } from 'react';
 import clsx from 'clsx';
 import { ResponsiveContainer, LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid } from 'recharts';
 import type { LucideProps } from 'lucide-react';
-import { Activity, Chrome, Cpu, Disc3, Gamepad2, Monitor, Radio, TerminalSquare } from 'lucide-react';
+import { Activity, Cpu, Monitor, TerminalSquare } from 'lucide-react';
 import type { TimePoint, Tone } from '@shared/models';
 
 export const toneClass: Record<Tone, { text: string; bg: string; border: string; stroke: string; fill: string }> = {
@@ -228,7 +228,7 @@ export function Meter({ label, value, valueLabel, tone = 'blue', rightLabel, com
         <div
           className="h-full rounded-full transition-all duration-500"
           style={{
-            width: `${Math.max(3, Math.min(100, value))}%`,
+            width: `${Math.max(0, Math.min(100, value))}%`,
             background: `linear-gradient(90deg, ${toneStyle.stroke}, rgba(255,255,255,0.55))`
           }}
         />
@@ -272,27 +272,15 @@ export function ProcessIcon({ name }: { name: string }) {
   let Icon: ComponentType<LucideProps> = Monitor;
   let tone: Tone = 'slate';
 
-  if (lower.includes('chrome')) {
-    Icon = Chrome;
-    tone = 'green';
-  } else if (lower.includes('discord')) {
-    Icon = Radio;
-    tone = 'purple';
-  } else if (lower.includes('roblox') || lower.includes('game')) {
-    Icon = Gamepad2;
-    tone = 'blue';
-  } else if (lower.includes('steam')) {
-    Icon = Disc3;
-    tone = 'cyan';
-  } else if (lower.includes('explorer')) {
+  if (lower.endsWith('.exe')) {
     Icon = TerminalSquare;
-    tone = 'yellow';
-  } else if (lower.includes('obs')) {
-    Icon = Activity;
-    tone = 'slate';
+    tone = 'cyan';
   } else if (lower.includes('system')) {
     Icon = Cpu;
     tone = 'blue';
+  } else if (lower.includes('service')) {
+    Icon = Activity;
+    tone = 'purple';
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useEffect, type ComponentType, type ReactNode } from 'react';
+import { useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   Activity,
@@ -26,12 +26,10 @@ import type { DisplayOverviewCards, PerformanceSnapshot, StatusChip, TimePoint, 
 import { useMonitorStore } from '@renderer/store/useMonitorStore';
 import { OverviewPage } from '@renderer/pages/OverviewPage';
 import { GlassCard, MetricRow, Sparkline, TinyButton, toneClass } from '@renderer/components/Primitives';
-
-const respondToStubAction = (action: string) => {
-  console.info(`[Performance Monitor] ${action}`);
-};
+import { actionNoticeEvent, notifyAction, type ActionNoticeDetail } from '@renderer/actionNotice';
 
 export default function App() {
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel } = useMonitorStore(
     useShallow((state) => ({
       snapshot: state.snapshot,
@@ -57,6 +55,25 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [fetchSnapshot, settings.fastRefreshMs]);
 
+  useEffect(() => {
+    const handleActionNotice = (event: Event) => {
+      const detail = (event as CustomEvent<ActionNoticeDetail>).detail;
+      setActionNotice(detail.message);
+    };
+
+    window.addEventListener(actionNoticeEvent, handleActionNotice);
+    return () => window.removeEventListener(actionNoticeEvent, handleActionNotice);
+  }, []);
+
+  useEffect(() => {
+    if (!actionNotice) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => setActionNotice(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [actionNotice]);
+
   if (!snapshot) {
     return <LoadingShell error={error} onRefresh={fetchSnapshot} />;
   }
@@ -72,6 +89,11 @@ export default function App() {
           <StubPage tab={selectedTab} cards={snapshot.display.overview} />
         )}
       </main>
+      {actionNotice ? (
+        <div className="pointer-events-none fixed right-5 top-[124px] z-50 max-w-[min(360px,calc(100vw-2rem))] rounded-lg border border-white/10 bg-[#111d2c] px-3.5 py-2 text-[12px] text-ink shadow-[0_14px_36px_rgba(0,0,0,0.28)]">
+          {actionNotice}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -79,7 +101,7 @@ export default function App() {
 function LoadingShell({ error, onRefresh }: { error: string | null; onRefresh: () => Promise<void> }) {
   return (
     <div className="grid h-screen place-items-center bg-app text-ink">
-      <div className="glass-card w-[420px] rounded-2xl p-6 text-center">
+      <div className="glass-card w-[min(92vw,420px)] rounded-2xl p-6 text-center">
         <div className="mx-auto grid size-12 place-items-center rounded-xl bg-cpu text-white">
           <Activity size={24} />
         </div>
@@ -110,16 +132,16 @@ function TopBar({ snapshot }: { snapshot: PerformanceSnapshot }) {
       </div>
 
       <div className="no-drag flex items-center justify-end gap-2">
-        <TinyButton title="Notifications" onClick={() => respondToStubAction('Notifications clicked')}>
+        <TinyButton title="Notifications" onClick={() => notifyAction('Notifications panel opened')}>
           <span className="relative">
             <Bell size={16} />
             <span className="absolute -right-1 -top-1 size-2 rounded-full bg-red-400" />
           </span>
         </TinyButton>
-        <TinyButton title="Settings" onClick={() => respondToStubAction('Settings clicked')}>
+        <TinyButton title="Settings" onClick={() => notifyAction('Settings panel opened')}>
           <Settings size={16} />
         </TinyButton>
-        <TinyButton title="More" onClick={() => respondToStubAction('Overflow menu clicked')}>
+        <TinyButton title="More" onClick={() => notifyAction('Overflow menu opened')}>
           <MoreVertical size={16} />
         </TinyButton>
         <WindowButton action="minimize">
@@ -188,7 +210,10 @@ function TabBar({
         {tabs.map((tab) => (
           <button
             key={tab}
-            onClick={() => onSelect(tab)}
+            onClick={() => {
+              onSelect(tab);
+              notifyAction(`${tab} view selected`);
+            }}
             className={clsx(
               'relative h-full px-1 pt-4 text-[12px] transition',
               selectedTab === tab ? 'text-ink' : 'text-muted hover:text-ink'
@@ -202,16 +227,19 @@ function TabBar({
       <div className="flex h-full items-center gap-2.5 text-[11px] text-muted">
         <span>Update: {snapshot.display.updateAgeLabel}</span>
         <button
-          onClick={() => void onRefresh()}
+          onClick={() => {
+            notifyAction('Snapshot refresh requested');
+            void onRefresh();
+          }}
           className="grid size-8 place-items-center rounded-lg text-muted transition hover:bg-white/[0.06] hover:text-ink"
           title="Refresh"
         >
           <RefreshCw size={15} className={clsx(isRefreshing && 'animate-spin')} />
         </button>
-        <TinyButton title="Grid" onClick={() => respondToStubAction('Grid control clicked')}>
+        <TinyButton title="Grid" onClick={() => notifyAction('Grid control acknowledged')}>
           <Grid2X2 size={15} />
         </TinyButton>
-        <TinyButton title="Theme" onClick={() => respondToStubAction('Theme control clicked')}>
+        <TinyButton title="Theme" onClick={() => notifyAction('Theme control acknowledged')}>
           <Moon size={15} />
         </TinyButton>
       </div>

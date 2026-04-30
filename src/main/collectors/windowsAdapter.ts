@@ -185,18 +185,6 @@ export class WindowsMetricsAdapter {
     return temp && temp > 0 && temp < 120 ? temp : null;
   }
 
-  getCpuLoad(): { totalPercent: number; perCorePercent: number[]; currentClockGhz: number } {
-    const cpuInfos = os.cpus();
-    const currentClockGhz =
-      cpuInfos.reduce((sum, cpu) => sum + cpu.speed, 0) / Math.max(1, cpuInfos.length) / 1000;
-
-    return {
-      totalPercent: 0,
-      perCorePercent: new Array(cpuInfos.length).fill(0),
-      currentClockGhz
-    };
-  }
-
   async getProcesses(): Promise<ProcessRow[]> {
     const raw = await runPowerShellJson<unknown>(
       'Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64,@{Name="ThreadCount";Expression={$_.Threads.Count}},@{Name="StartTimeUtc";Expression={try {$_.StartTime.ToUniversalTime().ToString("o")} catch {$null}}}',
@@ -209,14 +197,14 @@ export class WindowsMetricsAdapter {
         const record = asRecord(row);
         return {
           pid: toNumber(record?.Id) ?? 0,
-          name: typeof record?.ProcessName === 'string' ? record.ProcessName : 'Unknown',
+          name: typeof record?.ProcessName === 'string' ? record.ProcessName : '',
           cpuSeconds: toNumber(record?.CPU) ?? 0,
           workingSetBytes: toNumber(record?.WorkingSet64) ?? 0,
           threadCount: toNumber(record?.ThreadCount) ?? 0,
           startTimeMs: typeof record?.StartTimeUtc === 'string' ? Date.parse(record.StartTimeUtc) : null
         };
       })
-      .filter((row) => row.pid > 0);
+      .filter((row) => row.pid > 0 && row.name.trim().length > 0);
   }
 
   async getMemoryCacheBytes(): Promise<number | null> {
@@ -340,17 +328,15 @@ export class WindowsMetricsAdapter {
     );
     const record = firstRecord(raw);
     const health = typeof record?.Health === 'string' ? record.Health : null;
-    const healthPercent = health?.toLowerCase() === 'healthy' ? 98 : health ? 65 : null;
-    const sizeBytes = toNumber(record?.Size);
 
     return {
       label: typeof record?.Label === 'string' ? record.Label : null,
-      healthPercent,
-      healthGrade: health === 'Healthy' ? 'Excellent' : health,
+      healthPercent: null,
+      healthGrade: health,
       temperatureC: toNumber(record?.Temperature),
       powerOnHours: toNumber(record?.PowerOnHours),
       tbwBytes: toNumber(record?.HostWrites),
-      tbwLimitBytes: sizeBytes ? sizeBytes * 5 : null
+      tbwLimitBytes: null
     };
   }
 
@@ -394,7 +380,7 @@ export class WindowsMetricsAdapter {
     return percent === null ? null : Math.round(-100 + percent / 2);
   }
 
-  async getPingInfo(host = '1.1.1.1'): Promise<PingInfo> {
+  async getPingInfo(host: string): Promise<PingInfo> {
     const stdout = await runText('ping', ['-n', '3', host], 5000);
     if (!stdout) {
       return { latencyMs: null, packetLossPercent: null };
@@ -490,10 +476,10 @@ export class WindowsMetricsAdapter {
     }
 
     if (/No devices were found|No matching devices found/i.test(stdout)) {
-      return 'All up to date';
+      return 'No problem devices reported';
     }
 
     const problemMatches = stdout.match(/Instance ID:/gi);
-    return problemMatches?.length ? `${problemMatches.length} problem device${problemMatches.length === 1 ? '' : 's'}` : 'All up to date';
+    return problemMatches?.length ? `${problemMatches.length} problem device${problemMatches.length === 1 ? '' : 's'}` : 'No problem devices reported';
   }
 }

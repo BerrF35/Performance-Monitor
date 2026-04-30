@@ -36,9 +36,10 @@ import type {
   Tone
 } from '@shared/models';
 import { Gauge, GlassCard, Meter, MetricRow, ProcessIcon, Sparkline, Stat, TinyButton, toneClass } from '@renderer/components/Primitives';
+import { notifyAction } from '@renderer/actionNotice';
 
 const reportInteraction = (action: string, detail?: unknown) => {
-  console.info(`[Performance Monitor] ${action}`, detail ?? '');
+  notifyAction(action, detail);
 };
 
 interface OverviewPageProps {
@@ -102,14 +103,15 @@ function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
         <div className="mb-1.5 flex items-center justify-between gap-3">
           <span className="text-[12px] font-medium text-ink">Per-Core Usage</span>
           <div className="flex items-center gap-3 text-[11px] text-muted">
-            <LegendDot tone="blue" label={`P-Core ${cpu.pCoreUsageAveragePercent.label}`} />
-            <LegendDot tone="cyan" label={`E-Core ${cpu.eCoreUsageAveragePercent.label}`} />
+            <LegendDot tone="blue" label={`Logical Avg. ${cpu.logicalUsageAveragePercent.label}`} />
+            {cpu.pCoreUsageAveragePercent.source !== 'unavailable' ? <LegendDot tone="blue" label={`P-Core ${cpu.pCoreUsageAveragePercent.label}`} /> : null}
+            {cpu.eCoreUsageAveragePercent.source !== 'unavailable' ? <LegendDot tone="cyan" label={`E-Core ${cpu.eCoreUsageAveragePercent.label}`} /> : null}
             <span className={clsx('ml-1', toneClass[cpu.status.tone ?? 'green'].text)}>Status: {cpu.status.label}</span>
           </div>
         </div>
-        <div className="flex h-[74px] items-end gap-1.5 border-b border-white/10 pb-1.5">
+        <div className="grid h-[74px] items-end gap-1.5 border-b border-white/10 pb-1.5" style={{ gridTemplateColumns: `repeat(${Math.max(1, cpu.perCoreUsage.length)}, minmax(8px, 1fr))` }}>
           {cpu.perCoreUsage.map((core) => (
-            <div key={core.id} className="flex flex-1 flex-col items-center gap-1">
+            <div key={core.id} className="flex min-w-0 flex-col items-center gap-1">
               <div className="flex h-[56px] w-full items-end rounded-sm bg-white/[0.035]">
                 <div
                   className={clsx('w-full rounded-sm transition-all duration-500', core.tone === 'blue' ? 'bg-cpu shadow-glowBlue' : 'bg-net/80')}
@@ -120,6 +122,7 @@ function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
               <span className="text-[9px] text-muted">{core.label}</span>
             </div>
           ))}
+          {!cpu.perCoreUsage.length ? <p className="self-center text-[11px] text-muted">Per-core telemetry unavailable</p> : null}
         </div>
       </div>
 
@@ -127,8 +130,8 @@ function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
 
       <div className="mt-2.5 grid grid-cols-5 divide-x divide-white/10 rounded-lg border border-white/10 bg-white/[0.022] max-lg:grid-cols-3">
         <FooterMetric label="Load" value={cpu.load.label} />
-        <FooterMetric label="P-Core Avg." value={cpu.pCoreAverage.label} />
-        <FooterMetric label="E-Core Avg." value={cpu.eCoreAverage.label} />
+        <FooterMetric label="Logical Avg." value={cpu.logicalUsageAveragePercent.label} />
+        <FooterMetric label="Clock" value={cpu.currentClock.label} />
         <FooterMetric label="Threads" value={cpu.threads.label} />
         <FooterMetric label="Processes" value={cpu.processes.label} />
       </div>
@@ -191,6 +194,7 @@ function RamCard({ ram }: { ram: DisplayRamCardModel }) {
             {ram.topProcesses.map((process) => (
               <ProcessLine key={process.id} id={process.id} name={process.name} value={process.memoryLabel} />
             ))}
+            {!ram.topProcesses.length ? <p className="text-[11px] text-muted">No process memory telemetry available</p> : null}
           </div>
         </div>
       </div>
@@ -364,6 +368,7 @@ function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) 
             <span className="text-right text-muted">{process.gpuLabel}</span>
           </button>
         ))}
+        {!processes.length ? <p className="rounded-md border border-white/10 bg-white/[0.02] px-2 py-3 text-[11px] text-muted">No process telemetry available yet</p> : null}
       </div>
       <button onClick={() => reportInteraction('View all processes clicked')} className="mt-4 h-9 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06] hover:text-white">View All Processes</button>
     </GlassCard>
@@ -396,6 +401,7 @@ function SystemHealthCard({ health }: { health: DisplaySystemHealthCardModel }) 
               <p className="mt-1.5 text-[11px] text-muted">{alert.detail}</p>
             </div>
           ))}
+          {!health.recentAlerts.length ? <p className="mt-3 text-[11px] text-muted">No alerts in the current snapshot</p> : null}
           <button onClick={() => reportInteraction('View all alerts clicked')} className="mt-5 text-[11px] text-cpu hover:text-white">View all alerts</button>
         </div>
       </div>

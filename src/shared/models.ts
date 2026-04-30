@@ -32,7 +32,7 @@ export interface StatusChip {
 export interface CoreUsage {
   id: string;
   label: string;
-  type: 'P-Core' | 'E-Core';
+  type: 'P-Core' | 'E-Core' | 'Logical';
   usage: number;
 }
 
@@ -245,7 +245,7 @@ export interface RawSnapshot {
 export interface DisplayCoreUsage {
   id: string;
   label: string;
-  type: 'P-Core' | 'E-Core';
+  type: 'P-Core' | 'E-Core' | 'Logical';
   usagePercent: number;
   usageLabel: string;
   tone: Tone;
@@ -298,6 +298,7 @@ export interface DisplayCpuCardModel {
   packagePower: DisplayMetric<number>;
   maxBoost: DisplayMetric<number>;
   temperature: DisplayMetric<number | null>;
+  logicalUsageAveragePercent: DisplayMetric<number>;
   pCoreUsageAveragePercent: DisplayMetric<number>;
   eCoreUsageAveragePercent: DisplayMetric<number>;
   perCoreUsage: DisplayCoreUsage[];
