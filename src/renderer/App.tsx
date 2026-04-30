@@ -20,6 +20,7 @@ import {
   Zap
 } from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { tabs, type TabId } from '@shared/navigation';
 import type { DisplayOverviewCards, PerformanceSnapshot, StatusChip, TimePoint, Tone, WindowAction } from '@shared/models';
 import { useMonitorStore } from '@renderer/store/useMonitorStore';
@@ -27,7 +28,18 @@ import { OverviewPage } from '@renderer/pages/OverviewPage';
 import { GlassCard, MetricRow, Sparkline, TinyButton, toneClass } from '@renderer/components/Primitives';
 
 export default function App() {
-  const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel } = useMonitorStore();
+  const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel } = useMonitorStore(
+    useShallow((state) => ({
+      snapshot: state.snapshot,
+      selectedTab: state.selectedTab,
+      settings: state.settings,
+      isRefreshing: state.isRefreshing,
+      error: state.error,
+      setTab: state.setTab,
+      fetchSnapshot: state.fetchSnapshot,
+      togglePanel: state.togglePanel
+    }))
+  );
 
   useEffect(() => {
     void fetchSnapshot();

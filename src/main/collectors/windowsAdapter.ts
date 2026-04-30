@@ -20,6 +20,7 @@ export interface ProcessRow {
 }
 
 export interface GpuInfo {
+  provider: 'nvml' | 'wmi' | 'unavailable';
   name: string | null;
   utilizationPercent: number | null;
   coreClockGhz: number | null;
@@ -233,7 +234,12 @@ export class WindowsMetricsAdapter {
 
     const [video, utilization] = await Promise.all([this.getVideoControllerInfo(), this.getGpuCounterUtilization()]);
 
+    if (!video.name && video.vramTotalBytes === null && utilization === null) {
+      return this.emptyGpuInfo();
+    }
+
     return {
+      provider: 'wmi',
       ...video,
       utilizationPercent: utilization,
       coreClockGhz: null,
@@ -269,15 +275,21 @@ export class WindowsMetricsAdapter {
       return this.emptyGpuInfo();
     }
 
+    const coreClockMhz = toNumber(values[2]);
+    const memoryClockMhz = toNumber(values[3]);
+    const vramUsedMb = toNumber(values[6]);
+    const vramTotalMb = toNumber(values[7]);
+
     return {
+      provider: 'nvml',
       name: values[0] || null,
       utilizationPercent: toNumber(values[1]),
-      coreClockGhz: (toNumber(values[2]) ?? 0) / 1000,
-      memoryClockGhz: (toNumber(values[3]) ?? 0) / 1000,
+      coreClockGhz: coreClockMhz === null ? null : coreClockMhz / 1000,
+      memoryClockGhz: memoryClockMhz === null ? null : memoryClockMhz / 1000,
       powerDrawW: toNumber(values[4]),
       temperatureC: toNumber(values[5]),
-      vramUsedBytes: (toNumber(values[6]) ?? 0) * 1024 * 1024,
-      vramTotalBytes: (toNumber(values[7]) ?? 0) * 1024 * 1024,
+      vramUsedBytes: vramUsedMb === null ? null : vramUsedMb * 1024 * 1024,
+      vramTotalBytes: vramTotalMb === null ? null : vramTotalMb * 1024 * 1024,
       encoderUsagePercent: null
     };
   }
@@ -306,6 +318,7 @@ export class WindowsMetricsAdapter {
 
   private emptyGpuInfo(): GpuInfo {
     return {
+      provider: 'unavailable',
       name: null,
       utilizationPercent: null,
       coreClockGhz: null,

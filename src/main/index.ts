@@ -66,6 +66,10 @@ app.whenReady().then(() => {
   });
 });
 
+app.on('before-quit', () => {
+  snapshotService.stop();
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();

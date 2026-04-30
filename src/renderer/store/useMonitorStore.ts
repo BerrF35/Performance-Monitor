@@ -46,10 +46,9 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
       return;
     }
 
-    set({ isRefreshing: true, error: null });
     try {
       const snapshot = await window.performanceMonitor.getSnapshot();
-      set({ snapshot, isRefreshing: false });
+      set({ snapshot, isRefreshing: false, error: null });
     } catch (error) {
       set({
         isRefreshing: false,
