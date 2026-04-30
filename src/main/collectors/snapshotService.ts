@@ -44,8 +44,10 @@ interface ProcessState {
   name: string;
   generation: number;
   startTimeMs: number | null;
+  firstSeen: number;
   cpuAverage: NumberWindow;
   gpuAverage: NumberWindow;
+  rankScore: number;
   lastSeen: number;
   metric: ProcessMetric;
 }
@@ -205,11 +207,16 @@ const STATIC_INTERVAL_MS = 30_000;
 const PUBLIC_IP_INTERVAL_MS = 90_000;
 const PROCESS_RETENTION_MS = 10_000;
 const PROCESS_IDENTITY_RETENTION_MS = 5 * 60_000;
+const PROCESS_MIN_TOP_LIFETIME_MS = 5_000;
+const PROCESS_RANK_DECAY = 0.65;
 const GPU_UNAVAILABLE_CONFIRMATION_SAMPLES = 3;
 const GPU_ZERO_CONFIRMATION_SAMPLES = 2;
 const GPU_SOURCE_FAILURE_CONFIRMATION_SAMPLES = 3;
 const GPU_SOURCE_VALID_CONFIRMATION_SAMPLES = 4;
 const GPU_OUTLIER_CONFIRMATION_SAMPLES = 2;
+const GPU_SOURCE_SWITCH_COOLDOWN_MS = 30_000;
+const RUNTIME_DEBUG_STATS_INTERVAL_MS = 60_000;
+const RUNTIME_DEBUG_STATS_ENABLED = process.env.PERFORMANCE_MONITOR_DEBUG === '1';
 const SAMPLE_WINDOW = 4;
 const GPU_PROCESS_MULTIPLIERS = [0.62, 0.2, 0.12, 0.07] as const;
 type GpuTelemetryProvider = GpuInfo['provider'];
@@ -435,11 +442,14 @@ export class SnapshotService {
   private pendingGpuProvider: GpuTelemetryProvider | null = null;
   private activeGpuProviderFailureSamples = 0;
   private pendingGpuProviderSamples = 0;
+  private gpuProviderCooldownUntilMs = 0;
   private gpuProcessSource: MetricSource = 'fallback';
   private networkInfo: NetworkInfo | null = null;
   private networkRateSource: MetricSource = 'fallback';
   private diskReadsSinceLaunch = this.raw.overview.footer.totalDataReadBytes.value;
   private diskWritesSinceLaunch = this.raw.overview.footer.totalDataWrittenBytes.value;
+  private snapshotVersion = 0;
+  private snapshotsPublished = 0;
   private lastSnapshotMonotonicMs = performance.now();
   private expectedNextTickMs = this.lastSnapshotMonotonicMs;
   private schedulerTimer: NodeJS.Timeout | null = null;
@@ -449,7 +459,10 @@ export class SnapshotService {
   private schedulerMaxExecutionMs = 0;
   private schedulerMaxDriftMs = 0;
   private schedulerTotalMissedTicks = 0;
+  private schedulerCoalescedCycles = 0;
   private schedulerLastStatsLogMs = 0;
+  private runtimeStatsLastLogMs = 0;
+  private runtimeStatsLastSnapshotCount = 0;
   private lastProcessRefresh = 0;
   private lastGpuRefresh = 0;
   private lastDiskRefresh = 0;
@@ -499,15 +512,26 @@ export class SnapshotService {
       return;
     }
 
+    if (this.schedulerTimer) {
+      clearTimeout(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+
     const delayMs = Math.max(0, this.expectedNextTickMs - performance.now());
     this.schedulerTimer = setTimeout(() => {
+      this.schedulerTimer = null;
       void this.runSchedulerCycle();
     }, delayMs);
     this.schedulerTimer.unref?.();
   }
 
   private async runSchedulerCycle(): Promise<void> {
-    if (this.schedulerRunning || this.schedulerStopped) {
+    if (this.schedulerStopped) {
+      return;
+    }
+
+    if (this.schedulerRunning) {
+      this.schedulerCoalescedCycles += 1;
       return;
     }
 
@@ -594,8 +618,14 @@ export class SnapshotService {
           footer
         }
       };
-      this.snapshot = this.composeSnapshot(this.raw);
+      const nextVersion = this.snapshotVersion + 1;
+      const nextSnapshot = this.composeSnapshot(this.raw, nextVersion);
+      this.snapshotVersion = nextVersion;
+      this.snapshotsPublished += 1;
+      this.snapshot = nextSnapshot;
       this.lastSnapshotMonotonicMs = startedMonotonicMs;
+    } catch (error) {
+      console.warn(`[SnapshotService] Scheduler cycle failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       const completedMonotonicMs = performance.now();
       const executionMs = completedMonotonicMs - startedMonotonicMs;
@@ -616,8 +646,14 @@ export class SnapshotService {
   private advanceExpectedNextTick(now: number): void {
     if (this.expectedNextTickMs <= now) {
       const missedTicks = Math.floor((now - this.expectedNextTickMs) / SCHEDULER_INTERVAL_MS) + 1;
-      this.schedulerTotalMissedTicks += Math.max(0, missedTicks - 1);
+      const skippedTicks = Math.max(0, missedTicks - 1);
+      this.schedulerTotalMissedTicks += skippedTicks;
+      this.schedulerCoalescedCycles += skippedTicks;
       this.expectedNextTickMs += missedTicks * SCHEDULER_INTERVAL_MS;
+    }
+
+    if (this.expectedNextTickMs - now > SCHEDULER_INTERVAL_MS) {
+      this.expectedNextTickMs = now + SCHEDULER_INTERVAL_MS;
     }
   }
 
@@ -625,6 +661,7 @@ export class SnapshotService {
     this.schedulerMaxStartDelayMs = Math.max(this.schedulerMaxStartDelayMs, startDelayMs);
     this.schedulerMaxExecutionMs = Math.max(this.schedulerMaxExecutionMs, executionMs);
     this.schedulerMaxDriftMs = Math.max(this.schedulerMaxDriftMs, driftMs);
+    this.logRuntimeDebugStats(now);
 
     if (this.schedulerLastStatsLogMs === 0) {
       this.schedulerLastStatsLogMs = now;
@@ -633,10 +670,36 @@ export class SnapshotService {
 
     if (now - this.schedulerLastStatsLogMs >= 60_000) {
       console.info(
-        `[SnapshotService] Scheduler stats: maxStartDelay=${Math.round(this.schedulerMaxStartDelayMs)}ms maxExecution=${Math.round(this.schedulerMaxExecutionMs)}ms maxDrift=${Math.round(this.schedulerMaxDriftMs)}ms missedTicks=${this.schedulerTotalMissedTicks}`
+        `[SnapshotService] Scheduler stats: maxStartDelay=${Math.round(this.schedulerMaxStartDelayMs)}ms maxExecution=${Math.round(this.schedulerMaxExecutionMs)}ms maxDrift=${Math.round(this.schedulerMaxDriftMs)}ms missedTicks=${this.schedulerTotalMissedTicks} coalescedCycles=${this.schedulerCoalescedCycles}`
       );
       this.schedulerLastStatsLogMs = now;
     }
+  }
+
+  private logRuntimeDebugStats(now: number): void {
+    if (!RUNTIME_DEBUG_STATS_ENABLED) {
+      return;
+    }
+
+    if (this.runtimeStatsLastLogMs === 0) {
+      this.runtimeStatsLastLogMs = now;
+      this.runtimeStatsLastSnapshotCount = this.snapshotsPublished;
+      return;
+    }
+
+    if (now - this.runtimeStatsLastLogMs < RUNTIME_DEBUG_STATS_INTERVAL_MS) {
+      return;
+    }
+
+    const memory = process.memoryUsage();
+    const elapsedMinutes = Math.max(0.001, (now - this.runtimeStatsLastLogMs) / 60_000);
+    const snapshotDelta = this.snapshotsPublished - this.runtimeStatsLastSnapshotCount;
+    const snapshotRatePerMinute = snapshotDelta / elapsedMinutes;
+    console.info(
+      `[SnapshotService] Runtime stats: heap=${round(memory.heapUsed / bytes.mb(1), 1)}MB rss=${round(memory.rss / bytes.mb(1), 1)}MB snapshotRate=${round(snapshotRatePerMinute, 1)}/min maxDelay=${Math.round(this.schedulerMaxStartDelayMs)}ms maxExecution=${Math.round(this.schedulerMaxExecutionMs)}ms coalescedCycles=${this.schedulerCoalescedCycles}`
+    );
+    this.runtimeStatsLastLogMs = now;
+    this.runtimeStatsLastSnapshotCount = this.snapshotsPublished;
   }
 
   private createHistoryBuffers(overview: OverviewCards) {
@@ -661,9 +724,10 @@ export class SnapshotService {
     };
   }
 
-  private composeSnapshot(raw: RawSnapshot): PerformanceSnapshot {
+  private composeSnapshot(raw: RawSnapshot, version = this.snapshotVersion): PerformanceSnapshot {
     return {
       appName: 'Performance Monitor',
+      version,
       timestamp: raw.timestamp,
       updateAgeMs: 0,
       raw,
@@ -1471,6 +1535,7 @@ export class SnapshotService {
       const instantCpu = round((cpuDelta / elapsedSeconds / logicalCount) * 100, 1);
       const cpuAverage = existing?.cpuAverage ?? new NumberWindow(SAMPLE_WINDOW);
       const gpuAverage = existing?.gpuAverage ?? new NumberWindow(SAMPLE_WINDOW);
+      const firstSeen = existing?.firstSeen ?? now;
       cpuAverage.push(instantCpu);
       const metricRow: ProcessMetric = {
         pid: row.pid,
@@ -1492,8 +1557,10 @@ export class SnapshotService {
         name,
         generation: identity.generation,
         startTimeMs: identity.startTimeMs,
+        firstSeen,
         cpuAverage,
         gpuAverage,
+        rankScore: existing?.rankScore ?? 0,
         lastSeen: now,
         metric: metricRow
       });
@@ -1564,15 +1631,33 @@ export class SnapshotService {
   }
 
   private selectStableTopProcesses(now: number): ProcessMetric[] {
-    const candidates = [...this.processStates.values()]
-      .filter((state) => now - state.lastSeen <= PROCESS_RETENTION_MS)
-      .map((state) => ({
+    const existingStableKeys = new Set(this.stableTopProcessKeys);
+    const candidates: Array<{ state: ProcessState; score: number }> = [];
+
+    for (const state of this.processStates.values()) {
+      if (now - state.lastSeen > PROCESS_RETENTION_MS) {
+        continue;
+      }
+
+      const instantScore = state.metric.cpuPercent * 2 + state.metric.gpuPercent * 1.5 + state.metric.memoryBytes / bytes.gb(1);
+      const smoothedScore = state.rankScore === 0 ? instantScore : state.rankScore * PROCESS_RANK_DECAY + instantScore * (1 - PROCESS_RANK_DECAY);
+      const ageMs = now - state.firstSeen;
+      const ageMultiplier = ageMs >= PROCESS_MIN_TOP_LIFETIME_MS || existingStableKeys.has(state.key) ? 1 : Math.max(0.25, ageMs / PROCESS_MIN_TOP_LIFETIME_MS);
+      state.rankScore = smoothedScore;
+      candidates.push({
         state,
-        score: state.metric.cpuPercent * 2 + state.metric.gpuPercent * 1.5 + state.metric.memoryBytes / bytes.gb(1)
-      }))
-      .sort((a, b) => b.score - a.score || b.state.metric.memoryBytes - a.state.metric.memoryBytes);
+        score: smoothedScore * ageMultiplier
+      });
+    }
+
+    candidates.sort((a, b) => b.score - a.score || b.state.metric.memoryBytes - a.state.metric.memoryBytes);
+
     const candidateByKey = new Map(candidates.map((candidate) => [candidate.state.key, candidate]));
-    const stableKeys = this.stableTopProcessKeys.filter((key) => candidateByKey.has(key));
+    const replacementThreshold = candidates[Math.min(7, candidates.length - 1)]?.score ?? 0;
+    const stableKeys = this.stableTopProcessKeys.filter((key) => {
+      const candidate = candidateByKey.get(key);
+      return Boolean(candidate && (candidates.length < 8 || candidate.score >= replacementThreshold * 0.7));
+    });
 
     for (const candidate of candidates) {
       if (!stableKeys.includes(candidate.state.key)) {
@@ -1603,13 +1688,17 @@ export class SnapshotService {
     );
   }
 
-  private acceptGpuProvider(provider: GpuTelemetryProvider): boolean {
+  private acceptGpuProvider(provider: GpuTelemetryProvider, now: number): boolean {
     if (provider === 'unavailable') {
       return false;
     }
 
     if (this.activeGpuProvider === 'unavailable') {
-      return this.acceptPendingGpuProvider(provider);
+      if (now < this.gpuProviderCooldownUntilMs) {
+        return false;
+      }
+
+      return this.acceptPendingGpuProvider(provider, now);
     }
 
     if (provider === this.activeGpuProvider) {
@@ -1619,15 +1708,19 @@ export class SnapshotService {
       return true;
     }
 
+    if (now < this.gpuProviderCooldownUntilMs) {
+      return false;
+    }
+
     this.activeGpuProviderFailureSamples += 1;
     if (this.activeGpuProviderFailureSamples < GPU_SOURCE_FAILURE_CONFIRMATION_SAMPLES) {
       return false;
     }
 
-    return this.acceptPendingGpuProvider(provider);
+    return this.acceptPendingGpuProvider(provider, now);
   }
 
-  private acceptPendingGpuProvider(provider: GpuTelemetryProvider): boolean {
+  private acceptPendingGpuProvider(provider: GpuTelemetryProvider, now: number): boolean {
     if (this.pendingGpuProvider !== provider) {
       this.pendingGpuProvider = provider;
       this.pendingGpuProviderSamples = 1;
@@ -1637,6 +1730,10 @@ export class SnapshotService {
     this.pendingGpuProviderSamples += 1;
     if (this.pendingGpuProviderSamples < GPU_SOURCE_VALID_CONFIRMATION_SAMPLES) {
       return false;
+    }
+
+    if (this.activeGpuProvider !== provider) {
+      this.gpuProviderCooldownUntilMs = now + GPU_SOURCE_SWITCH_COOLDOWN_MS;
     }
 
     this.activeGpuProvider = provider;
@@ -1716,6 +1813,9 @@ export class SnapshotService {
     if (!this.hasGpuTelemetry(gpuInfo)) {
       this.gpuUnavailableSamples += 1;
       if (this.gpuUnavailableSamples >= GPU_UNAVAILABLE_CONFIRMATION_SAMPLES) {
+        if (this.activeGpuProvider !== 'unavailable') {
+          this.gpuProviderCooldownUntilMs = now + GPU_SOURCE_SWITCH_COOLDOWN_MS;
+        }
         this.activeGpuProvider = 'unavailable';
         this.pendingGpuProvider = null;
         this.pendingGpuProviderSamples = 0;
@@ -1726,7 +1826,7 @@ export class SnapshotService {
     }
 
     this.gpuUnavailableSamples = 0;
-    if (!this.acceptGpuProvider(gpuInfo.provider)) {
+    if (!this.acceptGpuProvider(gpuInfo.provider, now)) {
       this.gpuInfo = this.unavailableGpuInfo(gpuInfo);
       return;
     }

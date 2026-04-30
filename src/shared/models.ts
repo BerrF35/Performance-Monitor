@@ -467,6 +467,7 @@ export interface PerformanceDisplay {
 
 export interface PerformanceSnapshot {
   appName: 'Performance Monitor';
+  version: number;
   timestamp: number;
   updateAgeMs: number;
   raw: RawSnapshot;

@@ -52,7 +52,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     try {
       const snapshot = await window.performanceMonitor.getSnapshot();
       const current = get();
-      if (current.snapshot?.timestamp === snapshot.timestamp && current.error === null && !current.isRefreshing) {
+      if (current.snapshot && snapshot.version <= current.snapshot.version && current.error === null && !current.isRefreshing) {
         return;
       }
 
