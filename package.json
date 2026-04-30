@@ -1,0 +1,35 @@
+{
+  "name": "performance-monitor",
+  "version": "0.1.0",
+  "description": "A Windows desktop performance dashboard built with Electron, React, TypeScript, Tailwind, Zustand, and Recharts.",
+  "main": "./out/main/index.js",
+  "author": "Codex",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "tsc --noEmit && electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.22",
+    "clsx": "^2.1.1",
+    "electron-vite": "^4.0.0",
+    "lucide-react": "^0.561.0",
+    "postcss": "^8.5.6",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "recharts": "^3.5.1",
+    "tailwindcss": "^3.4.19",
+    "zustand": "^5.0.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "electron": "^39.2.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6"
+  }
+}
