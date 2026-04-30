@@ -27,6 +27,10 @@ import { useMonitorStore } from '@renderer/store/useMonitorStore';
 import { OverviewPage } from '@renderer/pages/OverviewPage';
 import { GlassCard, MetricRow, Sparkline, TinyButton, toneClass } from '@renderer/components/Primitives';
 
+const respondToStubAction = (action: string) => {
+  console.info(`[Performance Monitor] ${action}`);
+};
+
 export default function App() {
   const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel } = useMonitorStore(
     useShallow((state) => ({
@@ -91,31 +95,31 @@ function LoadingShell({ error, onRefresh }: { error: string | null; onRefresh: (
 
 function TopBar({ snapshot }: { snapshot: PerformanceSnapshot }) {
   return (
-    <header className="app-drag flex h-[68px] shrink-0 items-center border-b border-white/10 px-5">
-      <div className="flex w-[250px] items-center gap-3">
+    <header className="app-drag grid min-h-[68px] shrink-0 grid-cols-[minmax(190px,260px)_minmax(280px,1fr)_auto] items-center gap-4 border-b border-white/10 px-5 max-lg:grid-cols-[1fr_auto] max-lg:py-2">
+      <div className="flex min-w-0 items-center gap-3">
         <div className="grid size-9 place-items-center rounded-lg bg-cpu text-white shadow-glowBlue">
           <Activity size={20} />
         </div>
-        <div className="text-[17px] font-semibold tracking-normal">Performance Monitor</div>
+        <div className="truncate text-[17px] font-semibold tracking-normal">Performance Monitor</div>
       </div>
 
-      <div className="mx-auto grid min-w-[620px] max-w-[730px] flex-1 grid-cols-3 overflow-hidden rounded-xl border border-white/10 bg-white/[0.035] shadow-glass">
+      <div className="grid min-w-0 grid-cols-3 overflow-hidden rounded-xl border border-white/10 bg-white/[0.045] shadow-glass max-lg:order-3 max-lg:col-span-2">
         {snapshot.display.chips.map((chip, index) => (
           <StatusChipView key={chip.id} chip={chip} divided={index > 0} />
         ))}
       </div>
 
-      <div className="no-drag ml-5 flex w-[252px] items-center justify-end gap-2">
-        <TinyButton title="Notifications">
+      <div className="no-drag flex items-center justify-end gap-2">
+        <TinyButton title="Notifications" onClick={() => respondToStubAction('Notifications clicked')}>
           <span className="relative">
             <Bell size={16} />
             <span className="absolute -right-1 -top-1 size-2 rounded-full bg-red-400" />
           </span>
         </TinyButton>
-        <TinyButton title="Settings">
+        <TinyButton title="Settings" onClick={() => respondToStubAction('Settings clicked')}>
           <Settings size={16} />
         </TinyButton>
-        <TinyButton title="More">
+        <TinyButton title="More" onClick={() => respondToStubAction('Overflow menu clicked')}>
           <MoreVertical size={16} />
         </TinyButton>
         <WindowButton action="minimize">
@@ -204,10 +208,10 @@ function TabBar({
         >
           <RefreshCw size={15} className={clsx(isRefreshing && 'animate-spin')} />
         </button>
-        <TinyButton title="Grid">
+        <TinyButton title="Grid" onClick={() => respondToStubAction('Grid control clicked')}>
           <Grid2X2 size={15} />
         </TinyButton>
-        <TinyButton title="Theme">
+        <TinyButton title="Theme" onClick={() => respondToStubAction('Theme control clicked')}>
           <Moon size={15} />
         </TinyButton>
       </div>
@@ -224,9 +228,9 @@ function StubPage({ tab, cards }: { tab: TabId; cards: DisplayOverviewCards }) {
         <h1 className="text-[20px] font-semibold">{tab}</h1>
         <span className="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1 text-[11px] text-muted">Snapshot-backed summary</span>
       </div>
-      <div className="grid grid-cols-12 gap-4">
+      <div className="dashboard-grid">
         {panels.map((panel) => (
-          <GlassCard key={panel.title} className="col-span-12 lg:col-span-4" title={panel.title} subtitle={panel.subtitle} icon={panel.icon} tone={panel.tone}>
+          <GlassCard key={panel.title} title={panel.title} subtitle={panel.subtitle} icon={panel.icon} tone={panel.tone}>
             {panel.chart ? <Sparkline data={panel.chart.data} tone={panel.chart.tone} secondaryTone={panel.chart.secondaryTone} height={92} /> : null}
             <div className="mt-2 space-y-0.5">
               {panel.rows.map((row) => (
@@ -235,6 +239,11 @@ function StubPage({ tab, cards }: { tab: TabId; cards: DisplayOverviewCards }) {
             </div>
           </GlassCard>
         ))}
+        {!panels.length ? (
+          <GlassCard title="No Telemetry" subtitle="This view has no current snapshot-backed entries" icon={Activity} tone="slate">
+            <p className="text-[12px] text-muted">Open Overview or wait for the next collector sample.</p>
+          </GlassCard>
+        ) : null}
       </div>
     </div>
   );

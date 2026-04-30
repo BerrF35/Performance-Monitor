@@ -218,7 +218,6 @@ const GPU_SOURCE_SWITCH_COOLDOWN_MS = 30_000;
 const RUNTIME_DEBUG_STATS_INTERVAL_MS = 60_000;
 const RUNTIME_DEBUG_STATS_ENABLED = process.env.PERFORMANCE_MONITOR_DEBUG === '1';
 const SAMPLE_WINDOW = 4;
-const GPU_PROCESS_MULTIPLIERS = [0.62, 0.2, 0.12, 0.07] as const;
 type GpuTelemetryProvider = GpuInfo['provider'];
 
 const clamp = (value: number, min = 0, max = 100): number => Math.max(min, Math.min(max, value));
@@ -430,7 +429,7 @@ export class SnapshotService {
   private processRows: ProcessRow[] = [];
   private processMetrics: ProcessMetric[] = this.raw.overview.topProcesses;
   private networkSample: NetworkSample | null = null;
-  private readonly pingSamples = new NumberWindow(8, [12, 13, 11, 14]);
+  private readonly pingSamples = new NumberWindow(8);
   private batteryInfo: BatteryInfo | null = null;
   private fanInfo: FanInfo | null = null;
   private gpuInfo: GpuInfo | null = null;
@@ -568,11 +567,11 @@ export class SnapshotService {
       topProcesses = this.processMetrics.length ? this.processMetrics : topProcesses;
       const storage = this.buildStorage(elapsedSeconds, previous, topProcesses);
       const network = this.buildNetwork(startedMonotonicMs, previous, topProcesses);
-      const powerBattery = this.buildPowerBattery(startedMonotonicMs, previous, cpu.packagePowerW.value, gpu.powerDrawW.value);
+      const powerBattery = this.buildPowerBattery(previous, cpu.packagePowerW, gpu.powerDrawW);
       const thermalsFans = this.buildThermalsFans(previous, cpu.temperatureC, gpu.temperatureC, storage.temperatureC);
-      const systemHealth = this.buildSystemHealth(wallNow, previous, cpu.temperatureC.value, gpu.temperatureC.value, storage.healthPercent.value);
+      const systemHealth = this.buildSystemHealth(wallNow, previous, cpu.temperatureC, gpu.temperatureC, storage.healthPercent);
       const systemInformation = this.buildSystemInformation(wallNow, previous);
-      const trends = this.buildTrends(startedMonotonicMs, cpu.utilizationPercent, gpu.utilizationPercent.value, ram.inUsePercent, storage);
+      const trends = this.buildTrends(startedMonotonicMs, cpu.utilizationPercent, gpu.utilizationPercent, ram.inUsePercent, storage);
       ram.trendHistory = this.histories.ramTrend.series();
       const footer = this.buildFooter(cpu.utilizationPercent, gpu.utilizationPercent.value, ram.inUsePercent, storage, network, systemHealth);
       const powerMode = this.slowCache.powerMode ?? this.raw.chips[1]?.value ?? 'Balanced';
@@ -754,10 +753,8 @@ export class SnapshotService {
         usage: round(usage)
       };
     });
-    const pCoreAverage = round(currentClockGhz * (0.74 + average(shownCores.slice(0, pCoreCount)) / 260), 2);
-    const eCoreAverage = round(currentClockGhz * (0.54 + average(shownCores.slice(pCoreCount)) / 330), 2);
     const cpuTemp = this.cpuTemperatureC ?? previous.cpu.temperatureC.value;
-    const packagePowerW = round(8 + (totalPercent / 100) * 58, 1);
+    const hasTemperatureTelemetry = this.cpuTemperatureSource !== 'unavailable' && cpuTemp !== null;
 
     this.cpuTimes = currentTimes;
 
@@ -766,15 +763,15 @@ export class SnapshotService {
       deviceLabel: this.slowCache.cpuName ?? previous.cpu.deviceLabel,
       utilizationPercent: totalPercent,
       currentClockGhz: currentClockGhz || previous.cpu.currentClockGhz,
-      packagePowerW: metric(packagePowerW, 'estimated', 'Estimated when package power sensor is not exposed'),
+      packagePowerW: metric(0, 'unavailable'),
       maxBoostGhz: this.slowCache.maxBoostGhz ?? previous.cpu.maxBoostGhz,
       temperatureC: metric(cpuTemp, this.cpuTemperatureSource, this.cpuTemperatureSource === 'fallback' ? 'ACPI thermal zone unavailable' : undefined),
       perCoreUsage,
       utilizationHistory: this.histories.cpuUtilization.push(totalPercent),
-      status: cpuTemp && cpuTemp >= 92 ? 'Thermal Limit' : 'No Throttling',
+      status: hasTemperatureTelemetry ? (cpuTemp >= 92 ? 'Thermal Limit' : 'Temperature Normal') : DASH,
       loadPercent: totalPercent,
-      pCoreAverageGhz: pCoreAverage,
-      eCoreAverageGhz: eCoreAverage,
+      pCoreAverageGhz: 0,
+      eCoreAverageGhz: 0,
       threads: this.processRows.reduce((sum, row) => sum + row.threadCount, 0) || previous.cpu.threads,
       processes: this.processRows.length || previous.cpu.processes
     };
@@ -793,7 +790,7 @@ export class SnapshotService {
         return 'unavailable';
       }
 
-      return 'fallback';
+      return sourceOf(fallback.utilizationPercent) === 'fallback' ? 'unavailable' : sourceOf(fallback.utilizationPercent);
     };
     const fieldValue = <T>(current: T | null | undefined, cached: T | null | undefined, fallbackValue: T): T => {
       if (current !== null && current !== undefined && gpuInfo?.provider !== 'unavailable') {
@@ -817,10 +814,16 @@ export class SnapshotService {
         ? 'live'
         : cachedGpuInfo?.powerDrawW !== null && cachedGpuInfo?.powerDrawW !== undefined
           ? 'unavailable'
-          : 'estimated';
-    const powerDraw = powerSource === 'estimated' ? round(10 + utilization * 1.15, 1) : fieldValue(gpuInfo?.powerDrawW, cachedGpuInfo?.powerDrawW, fallback.powerDrawW.value);
-    const frametime = clamp(6 + (utilization / 100) * 22 + Math.sin(now / 700) * 5, 0, 50);
-    const gpuProcesses = this.buildGpuProcesses(now, topProcesses, utilization, utilizationSource);
+          : sourceOf(fallback.powerDrawW);
+    const powerDraw = fieldValue(gpuInfo?.powerDrawW, cachedGpuInfo?.powerDrawW, fallback.powerDrawW.value);
+    const frametime = fallback.frametimeHistory.at(-1)?.value ?? 0;
+    const gpuProcesses = this.buildGpuProcesses(now, topProcesses);
+    const encoderSource: MetricSource =
+      gpuInfo?.encoderUsagePercent !== null && gpuInfo?.encoderUsagePercent !== undefined && gpuInfo.provider !== 'unavailable'
+        ? 'live'
+        : cachedGpuInfo?.encoderUsagePercent !== null && cachedGpuInfo?.encoderUsagePercent !== undefined
+          ? 'unavailable'
+          : sourceOf(fallback.encoderUsagePercent);
 
     return {
       ...fallback,
@@ -833,25 +836,21 @@ export class SnapshotService {
       coreUsagePercent: round(utilization),
       vramUsedBytes: metric(vramUsed, fieldSource(gpuInfo?.vramUsedBytes, cachedGpuInfo?.vramUsedBytes)),
       vramTotalBytes: metric(vramTotal, fieldSource(gpuInfo?.vramTotalBytes, cachedGpuInfo?.vramTotalBytes)),
-      encoderUsagePercent: metric(gpuInfo?.encoderUsagePercent ?? fallback.encoderUsagePercent.value, gpuInfo?.encoderUsagePercent ? 'live' : 'fallback'),
+      encoderUsagePercent: metric(fieldValue(gpuInfo?.encoderUsagePercent, cachedGpuInfo?.encoderUsagePercent, fallback.encoderUsagePercent.value), encoderSource),
       frametimeHistory: this.histories.gpuFrametime.push(frametime),
-      status: utilization > 80 ? 'High GPU load' : 'GPU waiting on CPU',
+      status: utilizationSource === 'live' ? (utilization > 80 ? 'High GPU load' : 'GPU telemetry live') : DASH,
       topProcesses: gpuProcesses
     };
   }
 
-  private buildGpuProcesses(now: number, topProcesses: ProcessMetric[], utilization: number, utilizationSource: MetricSource): ProcessMetric[] {
+  private buildGpuProcesses(now: number, topProcesses: ProcessMetric[]): ProcessMetric[] {
     const baseProcesses = topProcesses.slice(0, 4);
-    this.gpuProcessSource = utilizationSource === 'live' ? 'estimated' : utilizationSource;
+    this.gpuProcessSource = 'unavailable';
 
     const processes = baseProcesses.map((process, index) => {
       const key = process.identityKey ?? (process.pid ? processKey(process.pid, process.name) : processId(process, index));
       const state = this.processStates.get(key);
-      const instantGpu = round(utilization * (GPU_PROCESS_MULTIPLIERS[index] ?? 0.04), 1);
-      if (state && utilizationSource !== 'fallback') {
-        state.gpuAverage.push(instantGpu);
-      }
-      const gpuPercent = state?.gpuAverage.size() ? movingAverage(state.gpuAverage) : process.gpuPercent;
+      const gpuPercent = 0;
 
       if (state) {
         const metricRow = {
@@ -931,27 +930,27 @@ export class SnapshotService {
     this.diskReadsSinceLaunch += readBytesPerSec * elapsedSeconds;
     this.diskWritesSinceLaunch += writeBytesPerSec * elapsedSeconds;
 
-    const activeProcess = topProcesses[0]
+    const activeProcess = topProcesses[0] && (topProcesses[0].diskReadBytesPerSec !== undefined || topProcesses[0].diskWriteBytesPerSec !== undefined)
       ? {
-          name: `${topProcesses[0].name} (active I/O)`,
-          readBytesPerSec: topProcesses[0].diskReadBytesPerSec ?? readBytesPerSec * 0.34,
-          writeBytesPerSec: topProcesses[0].diskWriteBytesPerSec ?? writeBytesPerSec * 0.28
+          name: topProcesses[0].name,
+          readBytesPerSec: topProcesses[0].diskReadBytesPerSec ?? 0,
+          writeBytesPerSec: topProcesses[0].diskWriteBytesPerSec ?? 0
         }
-      : fallback.activeProcess;
+      : null;
 
     return {
       ...fallback,
       deviceLabel: this.slowCache.storageLabel ?? fallback.deviceLabel,
       readBytesPerSec: metric(readBytesPerSec, counterSource(this.diskCounters.readBytesPerSec, fallback.readBytesPerSec)),
       writeBytesPerSec: metric(writeBytesPerSec, counterSource(this.diskCounters.writeBytesPerSec, fallback.writeBytesPerSec)),
-      healthPercent: metric(this.slowCache.storageHealthPercent ?? fallback.healthPercent.value, this.slowCache.storageHealthPercent ? 'live' : 'fallback'),
+      healthPercent: metric(this.slowCache.storageHealthPercent ?? fallback.healthPercent.value, this.slowCache.storageHealthPercent !== undefined ? 'live' : sourceOf(fallback.healthPercent)),
       healthGrade: this.slowCache.storageHealthGrade ?? fallback.healthGrade,
       latencyMs: metric(round(this.diskCounters.latencyMs ?? fallback.latencyMs.value, 2), counterSource(this.diskCounters.latencyMs, fallback.latencyMs)),
       queueDepth: metric(round(this.diskCounters.queueDepth ?? fallback.queueDepth.value, 1), counterSource(this.diskCounters.queueDepth, fallback.queueDepth)),
-      temperatureC: metric(this.slowCache.storageTemperatureC ?? fallback.temperatureC.value, this.slowCache.storageTemperatureC ? 'live' : 'fallback'),
-      tbwBytes: metric(this.slowCache.storageTbwBytes ?? fallback.tbwBytes.value, this.slowCache.storageTbwBytes ? 'live' : 'fallback'),
-      tbwLimitBytes: metric(this.slowCache.storageTbwLimitBytes ?? fallback.tbwLimitBytes.value, this.slowCache.storageTbwLimitBytes ? 'live' : 'fallback'),
-      powerOnHours: metric(this.slowCache.storagePowerOnHours ?? fallback.powerOnHours.value, this.slowCache.storagePowerOnHours ? 'live' : 'fallback'),
+      temperatureC: metric(this.slowCache.storageTemperatureC ?? fallback.temperatureC.value, this.slowCache.storageTemperatureC !== undefined && this.slowCache.storageTemperatureC !== null ? 'live' : sourceOf(fallback.temperatureC)),
+      tbwBytes: metric(this.slowCache.storageTbwBytes ?? fallback.tbwBytes.value, this.slowCache.storageTbwBytes !== undefined ? 'live' : sourceOf(fallback.tbwBytes)),
+      tbwLimitBytes: metric(this.slowCache.storageTbwLimitBytes ?? fallback.tbwLimitBytes.value, this.slowCache.storageTbwLimitBytes !== undefined ? 'live' : sourceOf(fallback.tbwLimitBytes)),
+      powerOnHours: metric(this.slowCache.storagePowerOnHours ?? fallback.powerOnHours.value, this.slowCache.storagePowerOnHours !== undefined ? 'live' : sourceOf(fallback.powerOnHours)),
       activityHistory: this.histories.storageActivity.push(readActivity, writeActivity),
       activeProcess
     };
@@ -962,7 +961,7 @@ export class SnapshotService {
     const current = this.networkInfo;
     let download = fallback.downloadBytesPerSec;
     let upload = fallback.uploadBytesPerSec;
-    let rateSource: MetricSource = this.networkSample ? 'unavailable' : 'fallback';
+    let rateSource: MetricSource = 'unavailable';
     const receivedBytes = current?.receivedBytes;
     const sentBytes = current?.sentBytes;
     const hasCounters = receivedBytes !== null && receivedBytes !== undefined && sentBytes !== null && sentBytes !== undefined;
@@ -994,33 +993,31 @@ export class SnapshotService {
       adapterLabel: current?.adapterLabel ?? fallback.adapterLabel,
       downloadBytesPerSec: download,
       uploadBytesPerSec: upload,
-      latencyMs: metric(this.pingSamples.latest() ?? fallback.latencyMs.value, this.pingSamples.size() > 4 ? 'live' : 'fallback'),
-      jitterMs: metric(round(this.calculateJitter(), 1), this.pingSamples.size() > 4 ? 'live' : 'fallback'),
+      latencyMs: metric(this.pingSamples.latest() ?? fallback.latencyMs.value, this.pingSamples.size() > 4 ? 'live' : sourceOf(fallback.latencyMs)),
+      jitterMs: metric(round(this.calculateJitter(), 1), this.pingSamples.size() > 4 ? 'live' : sourceOf(fallback.jitterMs)),
       packetLossPercent: fallback.packetLossPercent,
       signalDbm: metric(previous.network.signalDbm.value, previous.network.signalDbm.source),
       signalLabel: signalLabel(previous.network.signalDbm.value),
-      topUsage: this.buildNetworkUsage(topProcesses, download, upload),
+      topUsage: this.buildNetworkUsage(topProcesses),
       history: this.histories.network.push(clamp(networkMbps(download) / 4), clamp(networkMbps(upload) / 2)),
-      connections: metric(current?.connections ?? fallback.connections.value, current?.connections ? 'live' : 'fallback'),
-      dns: metric(current?.dns ?? fallback.dns.value, current?.dns ? 'live' : 'fallback'),
-      ipv4: metric(current?.ipv4 ?? fallback.ipv4.value, current?.ipv4 ? 'live' : 'fallback'),
-      publicIp: metric(this.slowCache.publicIp ?? fallback.publicIp.value, this.slowCache.publicIp ? 'live' : 'fallback')
+      connections: metric(current?.connections ?? fallback.connections.value, current?.connections !== null && current?.connections !== undefined ? 'live' : sourceOf(fallback.connections)),
+      dns: metric(current?.dns ?? fallback.dns.value, current?.dns ? 'live' : sourceOf(fallback.dns)),
+      ipv4: metric(current?.ipv4 ?? fallback.ipv4.value, current?.ipv4 ? 'live' : sourceOf(fallback.ipv4)),
+      publicIp: metric(this.slowCache.publicIp ?? fallback.publicIp.value, this.slowCache.publicIp ? 'live' : sourceOf(fallback.publicIp))
     };
   }
 
-  private buildNetworkUsage(topProcesses: ProcessMetric[], download: number, upload: number): NetworkUsageMetric[] {
-    const total = download + upload;
-    if (!topProcesses.length) {
-      return this.raw.overview.network.topUsage;
-    }
-
-    return topProcesses.slice(0, 4).map((process, index) => ({
-      name: process.name,
-      bytesPerSec: process.networkBytesPerSec ?? total * [0.34, 0.24, 0.14, 0.08][index]
-    }));
+  private buildNetworkUsage(topProcesses: ProcessMetric[]): NetworkUsageMetric[] {
+    return topProcesses
+      .filter((process) => process.networkBytesPerSec !== undefined)
+      .slice(0, 4)
+      .map((process) => ({
+        name: process.name,
+        bytesPerSec: process.networkBytesPerSec ?? 0
+      }));
   }
 
-  private buildPowerBattery(now: number, previous: OverviewCards, cpuPowerW: number, gpuPowerW: number) {
+  private buildPowerBattery(previous: OverviewCards, cpuPower: MetricValue<number>, gpuPower: MetricValue<number>) {
     const fallback = previous.powerBattery;
     const battery = this.batteryInfo;
     const batterySource = <T>(value: T | null | undefined, fallbackMetric: MetricValue<T | null>): MetricSource => {
@@ -1034,8 +1031,6 @@ export class SnapshotService {
 
       return sourceOf(fallbackMetric) === 'fallback' ? 'fallback' : 'unavailable';
     };
-    const totalPower = round(cpuPowerW + gpuPowerW + 8.5 + Math.sin(now / 1600) * 1.5, 1);
-
     return {
       ...fallback,
       batteryLevelPercent: metric(battery?.levelPercent ?? fallback.batteryLevelPercent.value, batterySource(battery?.levelPercent, fallback.batteryLevelPercent)),
@@ -1043,11 +1038,11 @@ export class SnapshotService {
       cycleCount: metric(battery?.cycleCount ?? fallback.cycleCount.value, batterySource(battery?.cycleCount, fallback.cycleCount)),
       fullChargeCapacityWh: metric(battery?.fullChargeCapacityWh ?? fallback.fullChargeCapacityWh.value, batterySource(battery?.fullChargeCapacityWh, fallback.fullChargeCapacityWh)),
       acConnected: metric(battery?.acConnected ?? fallback.acConnected.value, batterySource(battery?.acConnected, fallback.acConnected)),
-      totalSystemPowerW: metric(totalPower, 'estimated', 'Estimated from component draw where platform power telemetry is unavailable'),
-      cpuPowerW: metric(cpuPowerW, 'estimated'),
-      gpuPowerW: metric(gpuPowerW, this.gpuInfo?.powerDrawW ? 'live' : 'estimated'),
+      totalSystemPowerW: metric(fallback.totalSystemPowerW.value, sourceOf(fallback.totalSystemPowerW)),
+      cpuPowerW: metric(cpuPower.value, sourceOf(cpuPower)),
+      gpuPowerW: metric(gpuPower.value, sourceOf(gpuPower)),
       estimatedRemainingMinutes: metric(battery?.estimatedRemainingMinutes ?? fallback.estimatedRemainingMinutes.value, batterySource(battery?.estimatedRemainingMinutes, fallback.estimatedRemainingMinutes)),
-      powerHistory: this.histories.power.push(totalPower)
+      powerHistory: this.histories.power.push(fallback.totalSystemPowerW.value)
     };
   }
 
@@ -1058,11 +1053,8 @@ export class SnapshotService {
     ssdTemperature: MetricValue<number | null>
   ) {
     const fallback = previous.thermalsFans;
-    const maxTemp = Math.max(cpuTemperature.value ?? 0, gpuTemperature.value ?? 0, ssdTemperature.value ?? 0);
-    const coolingEfficiency = clamp(100 - Math.max(0, maxTemp - 35) * 1.4);
     const cpuFanRpm = this.fanInfo?.cpuFanRpm ?? fallback.cpuFanRpm.value;
     const gpuFanRpm = this.fanInfo?.gpuFanRpm ?? fallback.gpuFanRpm.value;
-    const noise = cpuFanRpm || gpuFanRpm ? round(24 + ((cpuFanRpm ?? 0) + (gpuFanRpm ?? 0)) / 550, 1) : fallback.noiseLevelDba.value;
     const fanSource = (value: number | null | undefined, fallbackMetric: MetricValue<number | null>): MetricSource => {
       if (this.lastFanRefresh === 0) {
         return sourceOf(fallbackMetric);
@@ -1076,7 +1068,8 @@ export class SnapshotService {
     };
     const cpuFanSource = fanSource(this.fanInfo?.cpuFanRpm, fallback.cpuFanRpm);
     const gpuFanSource = fanSource(this.fanInfo?.gpuFanRpm, fallback.gpuFanRpm);
-    const noiseSource: MetricSource = cpuFanSource === 'live' || gpuFanSource === 'live' ? 'estimated' : cpuFanSource === 'unavailable' || gpuFanSource === 'unavailable' ? 'unavailable' : 'fallback';
+    const noise = fallback.noiseLevelDba.value;
+    const noiseSource: MetricSource = sourceOf(fallback.noiseLevelDba);
 
     return {
       ...fallback,
@@ -1085,17 +1078,33 @@ export class SnapshotService {
       ssdTemperatureC: ssdTemperature,
       cpuFanRpm: metric(cpuFanRpm, cpuFanSource),
       gpuFanRpm: metric(gpuFanRpm, gpuFanSource),
-      coolingEfficiencyPercent: metric(round(coolingEfficiency), 'estimated'),
-      coolingLabel: coolingEfficiency > 75 ? 'Good' : coolingEfficiency > 55 ? 'Warm' : 'Limited',
+      coolingEfficiencyPercent: metric(fallback.coolingEfficiencyPercent.value, sourceOf(fallback.coolingEfficiencyPercent)),
+      coolingLabel: sourceOf(fallback.coolingEfficiencyPercent) === 'unavailable' ? DASH : fallback.coolingLabel,
       noiseLevelDba: metric(noise, noiseSource),
       noiseHistory: this.histories.noise.push(noise ?? fallback.noiseHistory.at(-1)?.value ?? 0)
     };
   }
 
-  private buildSystemHealth(now: number, previous: OverviewCards, cpuTemp: number | null, gpuTemp: number | null, storageHealth: number): SystemHealthCardModel {
-    const maxTemp = Math.max(cpuTemp ?? 0, gpuTemp ?? 0);
-    const thermalGood = maxTemp < 86;
-    const componentGood = storageHealth >= 80;
+  private buildSystemHealth(now: number, previous: OverviewCards, cpuTemp: MetricValue<number | null>, gpuTemp: MetricValue<number | null>, storageHealth: MetricValue<number>): SystemHealthCardModel {
+    const availableTemps = [cpuTemp, gpuTemp].filter((temperature) => sourceOf(temperature) !== 'unavailable' && temperature.value !== null);
+    const hasStorageHealth = sourceOf(storageHealth) !== 'unavailable';
+
+    if (!availableTemps.length && !hasStorageHealth) {
+      return {
+        overallStatus: DASH,
+        items: [
+          { label: 'Overall Status', status: DASH, tone: 'slate' },
+          { label: 'Thermal Status', status: DASH, tone: 'slate' },
+          { label: 'Performance', status: DASH, tone: 'slate' },
+          { label: 'Component Health', status: DASH, tone: 'slate' }
+        ],
+        recentAlerts: []
+      };
+    }
+
+    const maxTemp = availableTemps.length ? Math.max(...availableTemps.map((temperature) => temperature.value ?? 0)) : 0;
+    const thermalGood = !availableTemps.length || maxTemp < 86;
+    const componentGood = !hasStorageHealth || storageHealth.value >= 80;
     const overallStatus = thermalGood && componentGood ? 'Excellent' : thermalGood ? 'Good' : 'Attention';
     const alerts =
       overallStatus === 'Excellent'
@@ -1125,25 +1134,27 @@ export class SnapshotService {
     };
   }
 
-  private buildTrends(now: number, cpu: number, gpu: number, ram: number, storage: OverviewCards['storage']) {
+  private buildTrends(now: number, cpu: number, gpu: MetricValue<number>, ram: number, storage: OverviewCards['storage']) {
     const diskValue = clamp(((storage.readBytesPerSec.value + storage.writeBytesPerSec.value) / bytes.gb(1.5)) * 100);
     const shouldPush = this.lastLongHistoryRefresh === 0 || now - this.lastLongHistoryRefresh >= 60_000;
+    const gpuAvailable = sourceOf(gpu) !== 'unavailable';
+    const diskAvailable = sourceOf(storage.readBytesPerSec) !== 'unavailable' || sourceOf(storage.writeBytesPerSec) !== 'unavailable';
 
     if (shouldPush) {
       this.lastLongHistoryRefresh = now;
       this.histories.ramTrend.push(ram);
       this.histories.trendCpu.push(cpu);
-      this.histories.trendGpu.push(gpu);
+      this.histories.trendGpu.push(gpuAvailable ? gpu.value : this.histories.trendGpu.series().at(-1)?.value ?? 0);
       this.histories.trendRam.push(ram);
-      this.histories.trendDisk.push(diskValue);
+      this.histories.trendDisk.push(diskAvailable ? diskValue : this.histories.trendDisk.series().at(-1)?.value ?? 0);
     }
 
     return {
       lines: [
         { label: 'CPU', valueLabel: percentLabel(cpu), tone: 'blue' as const, history: this.histories.trendCpu.series() },
-        { label: 'GPU', valueLabel: percentLabel(gpu), tone: 'green' as const, history: this.histories.trendGpu.series() },
+        { label: 'GPU', valueLabel: gpuAvailable ? percentLabel(gpu.value) : DASH, tone: 'green' as const, history: this.histories.trendGpu.series() },
         { label: 'RAM', valueLabel: percentLabel(ram), tone: 'purple' as const, history: this.histories.trendRam.series() },
-        { label: 'Disk', valueLabel: percentLabel(diskValue), tone: 'blue' as const, history: this.histories.trendDisk.series() }
+        { label: 'Disk', valueLabel: diskAvailable ? percentLabel(diskValue) : DASH, tone: 'blue' as const, history: this.histories.trendDisk.series() }
       ]
     };
   }
@@ -1166,13 +1177,14 @@ export class SnapshotService {
 
   private buildFooter(cpu: number, gpu: number, ram: number, storage: OverviewCards['storage'], network: OverviewCards['network'], health: SystemHealthCardModel) {
     const activityPercent = clamp(cpu * 0.28 + gpu * 0.24 + ram * 0.18 + ((storage.readBytesPerSec.value + storage.writeBytesPerSec.value) / bytes.gb(1)) * 12 + ((network.downloadBytesPerSec + network.uploadBytesPerSec) / bytes.mb(25)) * 6);
+    const diskCounterSource: MetricSource = sourceOf(storage.readBytesPerSec) === 'live' || sourceOf(storage.writeBytesPerSec) === 'live' ? 'estimated' : 'unavailable';
 
     return {
-      systemHealthy: health.overallStatus !== 'Attention',
-      statusLine: health.overallStatus === 'Attention' ? 'Review active alerts' : 'All systems normal',
+      systemHealthy: health.overallStatus !== DASH && health.overallStatus !== 'Attention',
+      statusLine: health.overallStatus === DASH ? DASH : health.overallStatus === 'Attention' ? 'Review active alerts' : 'All systems normal',
       uptimeSeconds: os.uptime(),
-      totalDataReadBytes: metric(this.diskReadsSinceLaunch, 'estimated', 'Integrated from disk throughput counters during this app session'),
-      totalDataWrittenBytes: metric(this.diskWritesSinceLaunch, 'estimated', 'Integrated from disk throughput counters during this app session'),
+      totalDataReadBytes: metric(this.diskReadsSinceLaunch, diskCounterSource, 'Integrated from disk throughput counters during this app session'),
+      totalDataWrittenBytes: metric(this.diskWritesSinceLaunch, diskCounterSource, 'Integrated from disk throughput counters during this app session'),
       activityPercent: round(activityPercent)
     };
   }
@@ -1187,7 +1199,7 @@ export class SnapshotService {
       network: this.displayNetwork(overview),
       powerBattery: this.displayPowerBattery(overview),
       thermalsFans: this.displayThermalsFans(overview),
-      topProcesses: this.displayProcesses(overview.topProcesses, this.processRows.length ? 'live' : 'fallback'),
+      topProcesses: this.displayProcesses(overview.topProcesses, this.processRows.length ? 'live' : 'unavailable'),
       systemHealth: this.displaySystemHealth(overview),
       trends: this.displayTrends(overview),
       systemInformation: this.displaySystemInformation(overview),
@@ -1208,16 +1220,18 @@ export class SnapshotService {
     const eCores = cpu.perCoreUsage.filter((core) => core.type === 'E-Core');
     const pUsage = round(average(pCores.map((core) => core.usage)));
     const eUsage = round(average(eCores.map((core) => core.usage)));
+    const cpuSource: MetricSource = cpu.perCoreUsage.length ? 'live' : 'unavailable';
+    const statusSource: MetricSource = cpu.status === DASH ? 'unavailable' : 'estimated';
 
     return {
       deviceLabel: cpu.deviceLabel,
-      utilization: displayMetric(cpu.utilizationPercent, percentLabel(cpu.utilizationPercent), 'live', 'blue'),
-      currentClock: displayMetric(cpu.currentClockGhz, ghzLabel(cpu.currentClockGhz), 'live'),
+      utilization: displayMetric(cpu.utilizationPercent, percentLabel(cpu.utilizationPercent), cpuSource, 'blue'),
+      currentClock: displayMetric(cpu.currentClockGhz, ghzLabel(cpu.currentClockGhz), cpu.currentClockGhz > 0 ? 'live' : 'unavailable'),
       packagePower: displayMetric(cpu.packagePowerW.value, wattsLabel(cpu.packagePowerW.value), sourceOf(cpu.packagePowerW)),
-      maxBoost: displayMetric(cpu.maxBoostGhz, ghzLabel(cpu.maxBoostGhz), this.slowCache.maxBoostGhz ? 'live' : 'fallback'),
+      maxBoost: displayMetric(cpu.maxBoostGhz, ghzLabel(cpu.maxBoostGhz), this.slowCache.maxBoostGhz ? 'live' : 'unavailable'),
       temperature: displayMetric(cpu.temperatureC.value, celsiusLabel(cpu.temperatureC.value), sourceOf(cpu.temperatureC)),
-      pCoreUsageAveragePercent: displayMetric(pUsage, percentLabel(pUsage), 'live', 'blue'),
-      eCoreUsageAveragePercent: displayMetric(eUsage, percentLabel(eUsage), 'live', 'cyan'),
+      pCoreUsageAveragePercent: displayMetric(pUsage, percentLabel(pUsage), pCores.length ? 'live' : 'unavailable', 'blue'),
+      eCoreUsageAveragePercent: displayMetric(eUsage, percentLabel(eUsage), eCores.length ? 'live' : 'unavailable', 'cyan'),
       perCoreUsage: cpu.perCoreUsage.map((core) => {
         const tone: Tone = core.type === 'P-Core' ? 'blue' : 'cyan';
 
@@ -1231,12 +1245,12 @@ export class SnapshotService {
         };
       }),
       utilizationHistory: cpu.utilizationHistory,
-      status: displayMetric(cpu.status, cpu.status, cpu.status === 'No Throttling' ? 'live' : 'estimated', cpu.status === 'No Throttling' ? 'green' : 'orange'),
-      load: displayMetric(cpu.loadPercent, percentLabel(cpu.loadPercent), 'live'),
-      pCoreAverage: displayMetric(cpu.pCoreAverageGhz, ghzLabel(cpu.pCoreAverageGhz), 'estimated'),
-      eCoreAverage: displayMetric(cpu.eCoreAverageGhz, ghzLabel(cpu.eCoreAverageGhz), 'estimated'),
-      threads: displayMetric(cpu.threads, `${cpu.threads}`, this.processRows.length ? 'live' : 'fallback'),
-      processes: displayMetric(cpu.processes, `${cpu.processes}`, this.processRows.length ? 'live' : 'fallback')
+      status: displayMetric(cpu.status, cpu.status, statusSource, statusSource === 'unavailable' ? 'slate' : cpu.status === 'Thermal Limit' ? 'orange' : 'green'),
+      load: displayMetric(cpu.loadPercent, percentLabel(cpu.loadPercent), cpuSource),
+      pCoreAverage: displayMetric(cpu.pCoreAverageGhz, ghzLabel(cpu.pCoreAverageGhz), 'unavailable'),
+      eCoreAverage: displayMetric(cpu.eCoreAverageGhz, ghzLabel(cpu.eCoreAverageGhz), 'unavailable'),
+      threads: displayMetric(cpu.threads, `${cpu.threads}`, this.processRows.length ? 'live' : 'unavailable'),
+      processes: displayMetric(cpu.processes, `${cpu.processes}`, this.processRows.length ? 'live' : 'unavailable')
     };
   }
 
@@ -1256,36 +1270,37 @@ export class SnapshotService {
       vramUsage: displayMetric(`${gbLabel(gpu.vramUsedBytes.value)} / ${gbLabel(gpu.vramTotalBytes.value)}`, `${gbLabel(gpu.vramUsedBytes.value)} / ${gbLabel(gpu.vramTotalBytes.value)}`, sourceOf(gpu.vramUsedBytes), 'green'),
       encoderUsage: displayMetric(gpu.encoderUsagePercent.value, percentLabel(gpu.encoderUsagePercent.value), sourceOf(gpu.encoderUsagePercent), 'green'),
       frametimeHistory: gpu.frametimeHistory,
-      status: displayMetric(gpu.status, gpu.status, gpu.status.includes('waiting') ? 'estimated' : 'live', gpu.status.includes('High') ? 'orange' : 'yellow'),
+      status: displayMetric(gpu.status, gpu.status, gpu.status === DASH ? 'unavailable' : 'live', gpu.status.includes('High') ? 'orange' : gpu.status === DASH ? 'slate' : 'yellow'),
       topProcesses: this.displayProcesses(gpu.topProcesses, this.gpuProcessSource)
     };
   }
 
   private displayRam(overview: OverviewCards) {
     const ram = overview.ram;
+    const ramSource: MetricSource = ram.totalBytes > 0 ? 'live' : 'unavailable';
     const cachedPercent = round(safePercent(ram.cachedBytes.value, ram.totalBytes));
     const freePercent = round(safePercent(ram.freeBytes, ram.totalBytes));
 
     return {
-      inUse: displayMetric(ram.inUsePercent, percentLabel(ram.inUsePercent), 'live', 'purple'),
-      usedTotalLabel: `${gbLabel(ram.usedBytes)} / ${gbLabel(ram.totalBytes)}`,
-      used: displayMetric(ram.usedBytes, gbLabel(ram.usedBytes), 'live', 'purple'),
+      inUse: displayMetric(ram.inUsePercent, percentLabel(ram.inUsePercent), ramSource, 'purple'),
+      usedTotalLabel: ramSource === 'live' ? `${gbLabel(ram.usedBytes)} / ${gbLabel(ram.totalBytes)}` : DASH,
+      used: displayMetric(ram.usedBytes, gbLabel(ram.usedBytes), ramSource, 'purple'),
       cached: displayMetric(ram.cachedBytes.value, gbLabel(ram.cachedBytes.value), sourceOf(ram.cachedBytes), 'blue'),
       cachedPercent: displayMetric(cachedPercent, percentLabel(cachedPercent), sourceOf(ram.cachedBytes), 'blue'),
-      free: displayMetric(ram.freeBytes, gbLabel(ram.freeBytes), 'live', 'slate'),
-      freePercent: displayMetric(freePercent, percentLabel(freePercent), 'live', 'slate'),
+      free: displayMetric(ram.freeBytes, gbLabel(ram.freeBytes), ramSource, 'slate'),
+      freePercent: displayMetric(freePercent, percentLabel(freePercent), ramSource, 'slate'),
       topProcesses: ram.topProcesses.map((process, index) => {
-        const source: MetricSource = this.processRows.length ? 'live' : 'fallback';
+        const source: MetricSource = this.processRows.length ? 'live' : 'unavailable';
 
         return {
           id: `${process.name}-${index}`,
           name: process.name,
-          memoryLabel: gbLabel(process.memoryBytes),
+          memoryLabel: displayLabel(source, gbLabel(process.memoryBytes)),
           source
         };
       }),
       trendHistory: ram.trendHistory,
-      stability: displayMetric(ram.stabilityLabel, ram.stabilityLabel, 'estimated', ram.stabilityLabel === 'Stable' ? 'green' : 'orange')
+      stability: displayMetric(ram.stabilityLabel, ram.stabilityLabel, ram.stabilityLabel === DASH ? 'unavailable' : 'estimated', ram.stabilityLabel === 'Stable' ? 'green' : 'orange')
     };
   }
 
@@ -1405,9 +1420,10 @@ export class SnapshotService {
 
   private displaySystemHealth(overview: OverviewCards) {
     const health = overview.systemHealth;
+    const source: MetricSource = health.overallStatus === DASH ? 'unavailable' : 'estimated';
 
     return {
-      overallStatus: displayMetric(health.overallStatus, health.overallStatus, 'estimated', health.overallStatus === 'Attention' ? 'yellow' : 'green'),
+      overallStatus: displayMetric(health.overallStatus, health.overallStatus, source, health.overallStatus === 'Attention' ? 'yellow' : source === 'unavailable' ? 'slate' : 'green'),
       items: health.items,
       recentAlerts: health.recentAlerts.map((alert): DisplayAlertItem => ({
         ...alert,
@@ -1418,12 +1434,17 @@ export class SnapshotService {
 
   private displayTrends(overview: OverviewCards) {
     return {
-      lines: overview.trends.lines.map((line) => ({
-        label: line.label,
-        value: displayMetric(Number.parseFloat(line.valueLabel), line.valueLabel, 'estimated', line.tone),
-        tone: line.tone,
-        history: line.history
-      }))
+      lines: overview.trends.lines.map((line) => {
+        const parsedValue = Number.parseFloat(line.valueLabel);
+        const source: MetricSource = Number.isFinite(parsedValue) ? 'estimated' : 'unavailable';
+
+        return {
+          label: line.label,
+          value: displayMetric(Number.isFinite(parsedValue) ? parsedValue : 0, line.valueLabel, source, line.tone),
+          tone: line.tone,
+          history: line.history
+        };
+      })
     };
   }
 
@@ -1431,12 +1452,12 @@ export class SnapshotService {
     const info = overview.systemInformation;
 
     return {
-      deviceName: displayMetric(info.deviceName, info.deviceName, 'live'),
-      operatingSystem: displayMetric(info.operatingSystem, info.operatingSystem, this.slowCache.systemInfo?.operatingSystem ? 'live' : 'fallback'),
+      deviceName: displayMetric(info.deviceName, info.deviceName, info.deviceName === DASH ? 'unavailable' : 'live'),
+      operatingSystem: displayMetric(info.operatingSystem, info.operatingSystem, info.operatingSystem === DASH ? 'unavailable' : this.slowCache.systemInfo?.operatingSystem ? 'live' : 'fallback'),
       motherboard: displayMetric(info.motherboard.value, info.motherboard.value, sourceOf(info.motherboard)),
       biosVersion: displayMetric(info.biosVersion.value, info.biosVersion.value, sourceOf(info.biosVersion)),
-      uptime: displayMetric(info.uptimeSeconds, durationLabel(info.uptimeSeconds), 'live'),
-      lastBoot: displayMetric(info.lastBootIso, dateTimeLabel(info.lastBootIso), 'live'),
+      uptime: displayMetric(info.uptimeSeconds, durationLabel(info.uptimeSeconds), info.uptimeSeconds > 0 ? 'live' : 'unavailable'),
+      lastBoot: displayMetric(info.lastBootIso, dateTimeLabel(info.lastBootIso), info.uptimeSeconds > 0 ? 'live' : 'unavailable'),
       driversStatus: displayMetric(info.driversStatus.value, info.driversStatus.value, sourceOf(info.driversStatus), info.driversStatus.value.includes('problem') ? 'yellow' : 'green')
     };
   }
@@ -1448,9 +1469,9 @@ export class SnapshotService {
 
     return {
       systemHealthy: footer.systemHealthy,
-      healthLabel: footer.systemHealthy ? 'System Healthy' : 'Attention Required',
+      healthLabel: footer.statusLine === DASH ? DASH : footer.systemHealthy ? 'System Healthy' : 'Attention Required',
       statusLine: footer.statusLine,
-      uptime: displayMetric(footer.uptimeSeconds, durationLabel(footer.uptimeSeconds), 'live'),
+      uptime: displayMetric(footer.uptimeSeconds, durationLabel(footer.uptimeSeconds), footer.uptimeSeconds > 0 ? 'live' : 'unavailable'),
       totalDataRead: displayMetric(footer.totalDataReadBytes.value, tbLabel(footer.totalDataReadBytes.value), sourceOf(footer.totalDataReadBytes)),
       totalDataWritten: displayMetric(footer.totalDataWrittenBytes.value, footer.totalDataWrittenBytes.value >= bytes.tb(1) ? tbLabel(footer.totalDataWrittenBytes.value) : gbLabel(footer.totalDataWrittenBytes.value), sourceOf(footer.totalDataWrittenBytes)),
       activityLabel: percentLabel(footer.activityPercent),
@@ -1464,10 +1485,10 @@ export class SnapshotService {
       id: processId(process, index),
       name: process.name,
       cpuPercent: process.cpuPercent,
-      cpuLabel: percentLabel(process.cpuPercent),
-      ramLabel: gbLabel(process.memoryBytes),
+      cpuLabel: displayLabel(source, percentLabel(process.cpuPercent)),
+      ramLabel: displayLabel(source, gbLabel(process.memoryBytes)),
       gpuPercent: process.gpuPercent,
-      gpuLabel: percentLabel(process.gpuPercent),
+      gpuLabel: process.gpuPercent > 0 && source !== 'unavailable' ? percentLabel(process.gpuPercent) : DASH,
       diskReadLabel: process.diskReadBytesPerSec === undefined ? undefined : storageRateLabel(process.diskReadBytesPerSec),
       diskWriteLabel: process.diskWriteBytesPerSec === undefined ? undefined : storageRateLabel(process.diskWriteBytesPerSec),
       networkRateLabel: process.networkBytesPerSec === undefined ? undefined : mbpsLabel(process.networkBytesPerSec),

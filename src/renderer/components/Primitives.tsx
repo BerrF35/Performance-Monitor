@@ -168,17 +168,13 @@ interface SparklineProps {
 export function Sparkline({ data, tone = 'blue', secondaryTone, height = 96, area = false, yDomain = [0, 100] }: SparklineProps) {
   const primary = toneClass[tone];
   const secondary = secondaryTone ? toneClass[secondaryTone] : null;
-  const chartData = data.map((point, index) => ({
-    index,
-    value: point.value,
-    secondary: point.secondary
-  }));
+  const xDomain = data.length ? (['dataMin', 'dataMax'] as const) : ([0, 1] as const);
 
   if (area) {
     return (
       <div style={{ height }}>
         <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData} margin={{ top: 6, right: 2, bottom: 0, left: -30 }}>
+          <AreaChart data={data} margin={{ top: 6, right: 2, bottom: 0, left: -30 }}>
             <defs>
               <linearGradient id={`fill-${tone}`} x1="0" x2="0" y1="0" y2="1">
                 <stop offset="0%" stopColor={primary.stroke} stopOpacity={0.32} />
@@ -186,9 +182,9 @@ export function Sparkline({ data, tone = 'blue', secondaryTone, height = 96, are
               </linearGradient>
             </defs>
             <CartesianGrid className="chart-grid" vertical={false} />
-            <XAxis dataKey="index" hide />
+            <XAxis dataKey="timestamp" type="number" domain={xDomain} hide />
             <YAxis domain={yDomain} hide />
-            <Area type="monotone" dataKey="value" stroke={primary.stroke} fill={`url(#fill-${tone})`} strokeWidth={1.8} dot={false} isAnimationActive animationDuration={420} animationEasing="ease-out" />
+            <Area type="linear" dataKey="value" stroke={primary.stroke} fill={`url(#fill-${tone})`} strokeWidth={1.8} dot={false} isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -198,12 +194,12 @@ export function Sparkline({ data, tone = 'blue', secondaryTone, height = 96, are
   return (
     <div style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={chartData} margin={{ top: 6, right: 2, bottom: 0, left: -30 }}>
+        <LineChart data={data} margin={{ top: 6, right: 2, bottom: 0, left: -30 }}>
           <CartesianGrid className="chart-grid" vertical={false} />
-          <XAxis dataKey="index" hide />
+          <XAxis dataKey="timestamp" type="number" domain={xDomain} hide />
           <YAxis domain={yDomain} hide />
-          <Line type="monotone" dataKey="value" stroke={primary.stroke} strokeWidth={1.8} dot={false} isAnimationActive animationDuration={420} animationEasing="ease-out" />
-          {secondary ? <Line type="monotone" dataKey="secondary" stroke={secondary.stroke} strokeWidth={1.8} dot={false} isAnimationActive animationDuration={420} animationEasing="ease-out" /> : null}
+          <Line type="linear" dataKey="value" stroke={primary.stroke} strokeWidth={1.8} dot={false} isAnimationActive={false} />
+          {secondary ? <Line type="linear" dataKey="secondary" stroke={secondary.stroke} strokeWidth={1.8} dot={false} isAnimationActive={false} /> : null}
         </LineChart>
       </ResponsiveContainer>
     </div>
