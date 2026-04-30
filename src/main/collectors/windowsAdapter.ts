@@ -54,8 +54,11 @@ export interface NetworkInfo {
   adapterLabel: string | null;
   receivedBytes: number | null;
   sentBytes: number | null;
+  downloadBytesPerSec: number | null;
+  uploadBytesPerSec: number | null;
   ipv4: string | null;
   dns: string | null;
+  gateway: string | null;
   connections: number | null;
 }
 
@@ -76,6 +79,11 @@ export interface BatteryInfo {
 export interface FanInfo {
   cpuFanRpm: number | null;
   gpuFanRpm: number | null;
+  cpuTemperatureC: number | null;
+  gpuTemperatureC: number | null;
+  ssdTemperatureC: number | null;
+  cpuPackagePowerW: number | null;
+  gpuPowerW: number | null;
 }
 
 export interface SystemInfo {
@@ -222,7 +230,7 @@ export class WindowsMetricsAdapter {
       return nvidia;
     }
 
-    const [video, utilization] = await Promise.all([this.getVideoControllerInfo(), this.getGpuCounterUtilization()]);
+    const [video, utilization, vramUsedBytes] = await Promise.all([this.getVideoControllerInfo(), this.getGpuCounterUtilization(), this.getGpuMemoryUsageBytes()]);
 
     if (!video.name && video.vramTotalBytes === null && utilization === null) {
       return this.emptyGpuInfo();
@@ -236,7 +244,7 @@ export class WindowsMetricsAdapter {
       memoryClockGhz: null,
       powerDrawW: null,
       temperatureC: null,
-      vramUsedBytes: null,
+      vramUsedBytes,
       vramTotalBytes: video.vramTotalBytes,
       encoderUsagePercent: null
     };
@@ -246,7 +254,7 @@ export class WindowsMetricsAdapter {
     const stdout = await runText(
       'nvidia-smi',
       [
-        '--query-gpu=name,utilization.gpu,clocks.current.graphics,clocks.current.memory,power.draw,temperature.gpu,memory.used,memory.total',
+        '--query-gpu=name,utilization.gpu,utilization.encoder,clocks.current.graphics,clocks.current.memory,power.draw,temperature.gpu,memory.used,memory.total',
         '--format=csv,noheader,nounits'
       ],
       2500
@@ -261,14 +269,14 @@ export class WindowsMetricsAdapter {
       ?.split(',')
       .map((part) => part.trim());
 
-    if (!values || values.length < 8) {
+    if (!values || values.length < 9) {
       return this.emptyGpuInfo();
     }
 
-    const coreClockMhz = toNumber(values[2]);
-    const memoryClockMhz = toNumber(values[3]);
-    const vramUsedMb = toNumber(values[6]);
-    const vramTotalMb = toNumber(values[7]);
+    const coreClockMhz = toNumber(values[3]);
+    const memoryClockMhz = toNumber(values[4]);
+    const vramUsedMb = toNumber(values[7]);
+    const vramTotalMb = toNumber(values[8]);
 
     return {
       provider: 'nvml',
@@ -276,11 +284,11 @@ export class WindowsMetricsAdapter {
       utilizationPercent: toNumber(values[1]),
       coreClockGhz: coreClockMhz === null ? null : coreClockMhz / 1000,
       memoryClockGhz: memoryClockMhz === null ? null : memoryClockMhz / 1000,
-      powerDrawW: toNumber(values[4]),
-      temperatureC: toNumber(values[5]),
+      powerDrawW: toNumber(values[5]),
+      temperatureC: toNumber(values[6]),
       vramUsedBytes: vramUsedMb === null ? null : vramUsedMb * 1024 * 1024,
       vramTotalBytes: vramTotalMb === null ? null : vramTotalMb * 1024 * 1024,
-      encoderUsagePercent: null
+      encoderUsagePercent: toNumber(values[2])
     };
   }
 
@@ -306,6 +314,15 @@ export class WindowsMetricsAdapter {
     return value === null ? null : Math.max(0, Math.min(100, value));
   }
 
+  private async getGpuMemoryUsageBytes(): Promise<number | null> {
+    const raw = await runPowerShellJson<unknown>(
+      "$samples = (Get-Counter '\\GPU Adapter Memory(*)\\Dedicated Usage').CounterSamples; if ($samples) { [math]::Round(($samples | Measure-Object CookedValue -Sum).Sum, 0) }",
+      2500
+    );
+    const value = toNumber(raw);
+    return value === null || value < 0 ? null : value;
+  }
+
   private emptyGpuInfo(): GpuInfo {
     return {
       provider: 'unavailable',
@@ -328,10 +345,12 @@ export class WindowsMetricsAdapter {
     );
     const record = firstRecord(raw);
     const health = typeof record?.Health === 'string' ? record.Health : null;
+    const wear = toNumber(record?.Wear);
+    const healthPercent = wear === null ? null : Math.max(0, Math.min(100, 100 - wear));
 
     return {
       label: typeof record?.Label === 'string' ? record.Label : null,
-      healthPercent: null,
+      healthPercent,
       healthGrade: health,
       temperatureC: toNumber(record?.Temperature),
       powerOnHours: toNumber(record?.PowerOnHours),
@@ -342,7 +361,7 @@ export class WindowsMetricsAdapter {
 
   async getDiskCounters(): Promise<DiskCounterInfo> {
     const raw = await runPowerShellJson<unknown>(
-      "$c = Get-Counter -Counter '\\PhysicalDisk(_Total)\\Disk Read Bytes/sec','\\PhysicalDisk(_Total)\\Disk Write Bytes/sec','\\PhysicalDisk(_Total)\\Avg. Disk sec/Transfer','\\PhysicalDisk(_Total)\\Current Disk Queue Length'; $read=0; $write=0; $lat=$null; $queue=$null; foreach ($s in $c.CounterSamples) { if ($s.Path -like '*Disk Read Bytes/sec') { $read=$s.CookedValue } elseif ($s.Path -like '*Disk Write Bytes/sec') { $write=$s.CookedValue } elseif ($s.Path -like '*Avg. Disk sec/Transfer') { $lat=$s.CookedValue * 1000 } elseif ($s.Path -like '*Current Disk Queue Length') { $queue=$s.CookedValue } }; [pscustomobject]@{Read=$read;Write=$write;Latency=$lat;Queue=$queue}",
+      "$c = Get-Counter -Counter '\\PhysicalDisk(_Total)\\Disk Read Bytes/sec','\\PhysicalDisk(_Total)\\Disk Write Bytes/sec','\\PhysicalDisk(_Total)\\Avg. Disk sec/Transfer','\\PhysicalDisk(_Total)\\Current Disk Queue Length'; $read=$null; $write=$null; $lat=$null; $queue=$null; foreach ($s in $c.CounterSamples) { if ($s.Path -like '*Disk Read Bytes/sec') { $read=$s.CookedValue } elseif ($s.Path -like '*Disk Write Bytes/sec') { $write=$s.CookedValue } elseif ($s.Path -like '*Avg. Disk sec/Transfer') { $lat=$s.CookedValue * 1000 } elseif ($s.Path -like '*Current Disk Queue Length') { $queue=$s.CookedValue } }; [pscustomobject]@{Read=$read;Write=$write;Latency=$lat;Queue=$queue}",
       3000
     );
     const record = firstRecord(raw);
@@ -357,8 +376,8 @@ export class WindowsMetricsAdapter {
 
   async getNetworkInfo(): Promise<NetworkInfo> {
     const raw = await runPowerShellJson<unknown>(
-      "$adapter = Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Sort-Object LinkSpeed -Descending | Select-Object -First 1; if ($adapter) { $stats = Get-NetAdapterStatistics -Name $adapter.Name; $ip = Get-NetIPConfiguration -InterfaceIndex $adapter.ifIndex; $connections = (Get-NetTCPConnection | Measure-Object).Count; [pscustomobject]@{Label=$adapter.InterfaceDescription;Received=$stats.ReceivedBytes;Sent=$stats.SentBytes;IPv4=($ip.IPv4Address.IPAddress | Select-Object -First 1);Dns=($ip.DNSServer.ServerAddresses | Select-Object -First 1);Connections=$connections} }",
-      4500
+      "$cfg = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter \"IPEnabled=True\" | Where-Object { $_.IPAddress -and ($_.IPAddress | Where-Object { $_ -match '^\\d+\\.' -and $_ -notmatch '^169\\.254\\.' }) } | Select-Object -First 1; $statsText = netstat -e; $bytesLine = $statsText | Select-String -Pattern '^\\s*Bytes\\s+(\\d+)\\s+(\\d+)' | Select-Object -First 1; $received = if ($bytesLine) { [double]$bytesLine.Matches[0].Groups[1].Value } else { $null }; $sent = if ($bytesLine) { [double]$bytesLine.Matches[0].Groups[2].Value } else { $null }; $connections = (netstat -ano | Select-String -Pattern 'TCP|UDP').Count; $ipv4 = if ($cfg) { $cfg.IPAddress | Where-Object { $_ -match '^\\d+\\.' -and $_ -notmatch '^169\\.254\\.' } | Select-Object -First 1 } else { $null }; $dns = if ($cfg) { $cfg.DNSServerSearchOrder | Where-Object { $_ -match '^\\d+\\.' } | Select-Object -First 1 } else { $null }; $gateway = if ($cfg) { $cfg.DefaultIPGateway | Where-Object { $_ -match '^\\d+\\.' } | Select-Object -First 1 } else { $null }; [pscustomobject]@{Label=$cfg.Description;Received=$received;Sent=$sent;DownloadRate=$null;UploadRate=$null;IPv4=$ipv4;Dns=$dns;Gateway=$gateway;Connections=$connections}",
+      2500
     );
     const record = firstRecord(raw);
 
@@ -366,8 +385,11 @@ export class WindowsMetricsAdapter {
       adapterLabel: typeof record?.Label === 'string' ? record.Label : null,
       receivedBytes: toNumber(record?.Received),
       sentBytes: toNumber(record?.Sent),
+      downloadBytesPerSec: toNumber(record?.DownloadRate),
+      uploadBytesPerSec: toNumber(record?.UploadRate),
       ipv4: typeof record?.IPv4 === 'string' ? record.IPv4 : null,
       dns: typeof record?.Dns === 'string' ? record.Dns : null,
+      gateway: typeof record?.Gateway === 'string' ? record.Gateway : null,
       connections: toNumber(record?.Connections)
     };
   }
@@ -414,7 +436,7 @@ export class WindowsMetricsAdapter {
 
   async getBatteryInfo(): Promise<BatteryInfo> {
     const raw = await runPowerShellJson<unknown>(
-      "$battery = Get-CimInstance Win32_Battery | Select-Object -First 1; $full = Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity | Select-Object -First 1; $design = Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData | Select-Object -First 1; $cycles = Get-CimInstance -Namespace root/wmi -ClassName BatteryCycleCount | Select-Object -First 1; if ($battery) { [pscustomobject]@{Level=$battery.EstimatedChargeRemaining;Status=$battery.BatteryStatus;Remaining=$battery.EstimatedRunTime;Full=$full.FullChargedCapacity;Design=$design.DesignedCapacity;Cycles=$cycles.CycleCount} }",
+      "$battery = Get-CimInstance Win32_Battery | Select-Object -First 1; $full = Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity | Select-Object -First 1; $design = Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData | Select-Object -First 1; $cycles = Get-CimInstance -Namespace root/wmi -ClassName BatteryCycleCount | Select-Object -First 1; $result = if ($battery) { [pscustomobject]@{Level=$battery.EstimatedChargeRemaining;Status=$battery.BatteryStatus;Remaining=$battery.EstimatedRunTime;Full=$full.FullChargedCapacity;Design=$design.DesignedCapacity;Cycles=$cycles.CycleCount} } else { [pscustomobject]@{Level=$null;Status=$null;Remaining=$null;Full=$null;Design=$null;Cycles=$null} }; $result",
       4000
     );
     const record = firstRecord(raw);
@@ -435,14 +457,19 @@ export class WindowsMetricsAdapter {
 
   async getFanInfo(): Promise<FanInfo> {
     const raw = await runPowerShellJson<unknown>(
-      "$sensors = @(Get-CimInstance -Namespace root/OpenHardwareMonitor -ClassName Sensor -ErrorAction SilentlyContinue) + @(Get-CimInstance -Namespace root/LibreHardwareMonitor -ClassName Sensor -ErrorAction SilentlyContinue); $fans = $sensors | Where-Object {$_.SensorType -eq 'Fan'} | Select-Object -First 4 Name,Value; [pscustomobject]@{Cpu=($fans | Where-Object {$_.Name -match 'CPU'} | Select-Object -First 1 -ExpandProperty Value); Gpu=($fans | Where-Object {$_.Name -match 'GPU'} | Select-Object -First 1 -ExpandProperty Value)}",
-      3000
+      "$sensors = @(Get-CimInstance -Namespace root/OpenHardwareMonitor -ClassName Sensor -ErrorAction SilentlyContinue) + @(Get-CimInstance -Namespace root/LibreHardwareMonitor -ClassName Sensor -ErrorAction SilentlyContinue); function FirstSensor($type, [string[]]$patterns) { $items = @($sensors | Where-Object {$_.SensorType -eq $type}); foreach ($pattern in $patterns) { $match = $items | Where-Object { ($_.Name -match $pattern) -or ($_.Identifier -match $pattern) -or ($_.Parent -match $pattern) } | Select-Object -First 1; if ($match) { return $match.Value } }; return $null }; [pscustomobject]@{CpuFan=(FirstSensor 'Fan' @('CPU','Processor')); GpuFan=(FirstSensor 'Fan' @('GPU','Graphics')); CpuTemp=(FirstSensor 'Temperature' @('CPU Package','CPU Core','Core Max','Tctl','Tdie','CPU')); GpuTemp=(FirstSensor 'Temperature' @('GPU Core','GPU')); SsdTemp=(FirstSensor 'Temperature' @('NVMe','SSD','HDD','Drive','Disk')); CpuPower=(FirstSensor 'Power' @('CPU Package','CPU Cores','Processor')); GpuPower=(FirstSensor 'Power' @('GPU Package','GPU'))}",
+      3500
     );
     const record = firstRecord(raw);
 
     return {
-      cpuFanRpm: toNumber(record?.Cpu),
-      gpuFanRpm: toNumber(record?.Gpu)
+      cpuFanRpm: toNumber(record?.CpuFan),
+      gpuFanRpm: toNumber(record?.GpuFan),
+      cpuTemperatureC: toNumber(record?.CpuTemp),
+      gpuTemperatureC: toNumber(record?.GpuTemp),
+      ssdTemperatureC: toNumber(record?.SsdTemp),
+      cpuPackagePowerW: toNumber(record?.CpuPower),
+      gpuPowerW: toNumber(record?.GpuPower)
     };
   }
 

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import clsx from 'clsx';
 import {
   Activity,
@@ -344,6 +345,9 @@ function ThermalsFansCard({ thermals }: { thermals: DisplayThermalsFansCardModel
 }
 
 function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) {
+  const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
+  const selectedProcess = processes.find((process) => process.id === selectedProcessId) ?? null;
+
   return (
     <GlassCard title="Top Processes" icon={ListChecks} tone="blue">
       <div className="grid grid-cols-[1fr_58px_68px_52px] border-b border-white/10 pb-1.5 text-[11px] text-muted">
@@ -356,8 +360,14 @@ function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) 
         {processes.slice(0, 6).map((process) => (
           <button
             key={process.id}
-            onClick={() => reportInteraction('Process selected', { id: process.id, name: process.name })}
-            className="grid grid-cols-[1fr_58px_68px_52px] items-center gap-2 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]"
+            onClick={() => {
+              setSelectedProcessId(process.id);
+              reportInteraction('Process selected', { id: process.id, name: process.name });
+            }}
+            className={clsx(
+              'grid grid-cols-[1fr_58px_68px_52px] items-center gap-2 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]',
+              selectedProcessId === process.id && 'bg-cpu/10 ring-1 ring-cpu/25'
+            )}
           >
             <span className="flex min-w-0 items-center gap-2">
               <ProcessIcon name={process.name} />
@@ -370,6 +380,16 @@ function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) 
         ))}
         {!processes.length ? <p className="rounded-md border border-white/10 bg-white/[0.02] px-2 py-3 text-[11px] text-muted">No process telemetry available yet</p> : null}
       </div>
+      {selectedProcess ? (
+        <div className="mt-3 rounded-lg border border-cpu/20 bg-cpu/5 px-2.5 py-2 text-[11px] text-muted">
+          <p className="truncate text-[12px] font-medium text-ink">{selectedProcess.name}</p>
+          <div className="mt-1 grid grid-cols-3 gap-2">
+            <span>CPU <span className="text-ink">{selectedProcess.cpuLabel}</span></span>
+            <span>RAM <span className="text-ink">{selectedProcess.ramLabel}</span></span>
+            <span>GPU <span className="text-ink">{selectedProcess.gpuLabel}</span></span>
+          </div>
+        </div>
+      ) : null}
       <button onClick={() => reportInteraction('View all processes clicked')} className="mt-4 h-9 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06] hover:text-white">View All Processes</button>
     </GlassCard>
   );

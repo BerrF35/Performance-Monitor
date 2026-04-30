@@ -291,6 +291,10 @@ function sourceOf<T>(value: MetricValue<T> | undefined, fallback: MetricSource =
   return value?.source ?? fallback;
 }
 
+function lastKnownSource<T>(fallbackMetric: MetricValue<T>): MetricSource {
+  return sourceOf(fallbackMetric) === 'unavailable' ? 'unavailable' : 'fallback';
+}
+
 function displayMetric<T>(value: T, label: string, source: MetricSource, tone?: Tone): DisplayMetric<T> {
   return { value, label: displayLabel(source, label), source, tone };
 }
@@ -469,6 +473,15 @@ export class SnapshotService {
   private readonly pingSamples = new NumberWindow(8);
   private batteryInfo: BatteryInfo | null = null;
   private fanInfo: FanInfo | null = null;
+  private fanSources: Record<keyof FanInfo, MetricSource> = {
+    cpuFanRpm: 'unavailable',
+    gpuFanRpm: 'unavailable',
+    cpuTemperatureC: 'unavailable',
+    gpuTemperatureC: 'unavailable',
+    ssdTemperatureC: 'unavailable',
+    cpuPackagePowerW: 'unavailable',
+    gpuPowerW: 'unavailable'
+  };
   private gpuInfo: GpuInfo | null = null;
   private lastValidGpuInfo: GpuInfo | null = null;
   private gpuUnavailableSamples = 0;
@@ -785,6 +798,8 @@ export class SnapshotService {
     });
     const cpuTemp = this.cpuTemperatureC ?? previous.cpu.temperatureC.value;
     const hasTemperatureTelemetry = this.cpuTemperatureSource !== 'unavailable' && cpuTemp !== null;
+    const cpuPackagePower = this.fanInfo?.cpuPackagePowerW ?? previous.cpu.packagePowerW.value;
+    const cpuPackagePowerSource = this.fanSources.cpuPackagePowerW !== 'unavailable' ? this.fanSources.cpuPackagePowerW : lastKnownSource(previous.cpu.packagePowerW);
 
     this.cpuTimes = currentTimes;
 
@@ -793,7 +808,7 @@ export class SnapshotService {
       deviceLabel: this.slowCache.cpuName ?? previous.cpu.deviceLabel,
       utilizationPercent: totalPercent,
       currentClockGhz,
-      packagePowerW: metric(0, 'unavailable'),
+      packagePowerW: metric(round(cpuPackagePower, 1), cpuPackagePowerSource),
       maxBoostGhz: this.slowCache.maxBoostGhz ?? previous.cpu.maxBoostGhz,
       temperatureC: metric(cpuTemp, this.cpuTemperatureSource),
       perCoreUsage,
@@ -811,19 +826,22 @@ export class SnapshotService {
     const fallback = previous.gpu;
     const gpuInfo = this.gpuInfo;
     const cachedGpuInfo = this.lastValidGpuInfo;
+    const gpuProviderLive = gpuInfo?.provider !== undefined && gpuInfo.provider !== 'unavailable';
+    const sensorGpuTemperature = this.fanInfo?.gpuTemperatureC;
+    const sensorGpuPower = this.fanInfo?.gpuPowerW;
     const fieldSource = <T>(current: T | null | undefined, cached: T | null | undefined, fallbackMetric: MetricValue<T>): MetricSource => {
-      if (current !== null && current !== undefined && gpuInfo?.provider !== 'unavailable') {
+      if (current !== null && current !== undefined && gpuProviderLive) {
         return 'live';
       }
 
       if (cached !== null && cached !== undefined) {
-        return 'unavailable';
+        return 'fallback';
       }
 
-      return sourceOf(fallbackMetric) === 'fallback' ? 'unavailable' : sourceOf(fallbackMetric);
+      return lastKnownSource(fallbackMetric);
     };
     const fieldValue = <T>(current: T | null | undefined, cached: T | null | undefined, fallbackValue: T): T => {
-      if (current !== null && current !== undefined && gpuInfo?.provider !== 'unavailable') {
+      if (current !== null && current !== undefined && gpuProviderLive) {
         return current;
       }
 
@@ -839,21 +857,22 @@ export class SnapshotService {
     const memoryClock = fieldValue(gpuInfo?.memoryClockGhz, cachedGpuInfo?.memoryClockGhz, fallback.memoryClockGhz.value);
     const vramTotal = fieldValue(gpuInfo?.vramTotalBytes, cachedGpuInfo?.vramTotalBytes, fallback.vramTotalBytes.value);
     const vramUsed = fieldValue(gpuInfo?.vramUsedBytes, cachedGpuInfo?.vramUsedBytes, fallback.vramUsedBytes.value);
-    const powerSource: MetricSource =
-      gpuInfo?.powerDrawW !== null && gpuInfo?.powerDrawW !== undefined && gpuInfo.provider !== 'unavailable'
-        ? 'live'
-        : cachedGpuInfo?.powerDrawW !== null && cachedGpuInfo?.powerDrawW !== undefined
-          ? 'unavailable'
-          : sourceOf(fallback.powerDrawW);
-    const powerDraw = fieldValue(gpuInfo?.powerDrawW, cachedGpuInfo?.powerDrawW, fallback.powerDrawW.value);
+    const hasGpuPower = gpuInfo?.powerDrawW !== null && gpuInfo?.powerDrawW !== undefined && gpuProviderLive;
+    const hasSensorPower = sensorGpuPower !== null && sensorGpuPower !== undefined && this.fanSources.gpuPowerW !== 'unavailable';
+    const powerSource: MetricSource = hasGpuPower ? 'live' : hasSensorPower ? this.fanSources.gpuPowerW : cachedGpuInfo?.powerDrawW !== null && cachedGpuInfo?.powerDrawW !== undefined ? 'fallback' : lastKnownSource(fallback.powerDrawW);
+    const powerDraw = (hasGpuPower ? gpuInfo.powerDrawW : hasSensorPower ? sensorGpuPower : cachedGpuInfo?.powerDrawW) ?? fallback.powerDrawW.value;
+    const hasGpuTemperature = gpuInfo?.temperatureC !== null && gpuInfo?.temperatureC !== undefined && gpuProviderLive;
+    const hasSensorTemperature = sensorGpuTemperature !== null && sensorGpuTemperature !== undefined && this.fanSources.gpuTemperatureC !== 'unavailable';
+    const temperatureSource: MetricSource = hasGpuTemperature ? 'live' : hasSensorTemperature ? this.fanSources.gpuTemperatureC : cachedGpuInfo?.temperatureC !== null && cachedGpuInfo?.temperatureC !== undefined ? 'fallback' : lastKnownSource(fallback.temperatureC);
+    const temperature = (hasGpuTemperature ? gpuInfo.temperatureC : hasSensorTemperature ? sensorGpuTemperature : cachedGpuInfo?.temperatureC) ?? fallback.temperatureC.value;
     const frametime = null;
     const gpuProcesses = this.buildGpuProcesses();
     const encoderSource: MetricSource =
       gpuInfo?.encoderUsagePercent !== null && gpuInfo?.encoderUsagePercent !== undefined && gpuInfo.provider !== 'unavailable'
         ? 'live'
         : cachedGpuInfo?.encoderUsagePercent !== null && cachedGpuInfo?.encoderUsagePercent !== undefined
-          ? 'unavailable'
-          : sourceOf(fallback.encoderUsagePercent);
+          ? 'fallback'
+          : lastKnownSource(fallback.encoderUsagePercent);
 
     return {
       ...fallback,
@@ -862,13 +881,13 @@ export class SnapshotService {
       coreClockGhz: metric(round(coreClock, 2), fieldSource(gpuInfo?.coreClockGhz, cachedGpuInfo?.coreClockGhz, fallback.coreClockGhz)),
       memoryClockGhz: metric(round(memoryClock, 2), fieldSource(gpuInfo?.memoryClockGhz, cachedGpuInfo?.memoryClockGhz, fallback.memoryClockGhz)),
       powerDrawW: metric(round(powerDraw, 1), powerSource),
-      temperatureC: metric(fieldValue(gpuInfo?.temperatureC, cachedGpuInfo?.temperatureC, fallback.temperatureC.value), fieldSource(gpuInfo?.temperatureC, cachedGpuInfo?.temperatureC, fallback.temperatureC)),
+      temperatureC: metric(temperature, temperatureSource),
       coreUsagePercent: round(utilization),
       vramUsedBytes: metric(vramUsed, fieldSource(gpuInfo?.vramUsedBytes, cachedGpuInfo?.vramUsedBytes, fallback.vramUsedBytes)),
       vramTotalBytes: metric(vramTotal, fieldSource(gpuInfo?.vramTotalBytes, cachedGpuInfo?.vramTotalBytes, fallback.vramTotalBytes)),
       encoderUsagePercent: metric(fieldValue(gpuInfo?.encoderUsagePercent, cachedGpuInfo?.encoderUsagePercent, fallback.encoderUsagePercent.value), encoderSource),
       frametimeHistory: this.histories.gpuFrametime.push(frametime),
-      status: utilizationSource === 'live' ? (utilization > 80 ? 'High GPU load' : 'GPU telemetry live') : DASH,
+      status: utilizationSource === 'live' ? (utilization > 80 ? 'High GPU load' : 'GPU telemetry live') : utilizationSource === 'fallback' ? 'Last known GPU telemetry' : DASH,
       topProcesses: gpuProcesses
     };
   }
@@ -920,7 +939,7 @@ export class SnapshotService {
         return 'live';
       }
 
-      return sourceOf(fallbackMetric) === 'fallback' ? 'fallback' : 'unavailable';
+      return lastKnownSource(fallbackMetric);
     };
     const readSource = counterSource(this.diskCounters.readBytesPerSec, fallback.readBytesPerSec);
     const writeSource = counterSource(this.diskCounters.writeBytesPerSec, fallback.writeBytesPerSec);
@@ -947,14 +966,14 @@ export class SnapshotService {
       deviceLabel: this.slowCache.storageLabel ?? fallback.deviceLabel,
       readBytesPerSec: metric(readBytesPerSec, readSource),
       writeBytesPerSec: metric(writeBytesPerSec, writeSource),
-      healthPercent: metric(this.slowCache.storageHealthPercent ?? fallback.healthPercent.value, this.slowCache.storageHealthPercent !== undefined ? 'live' : sourceOf(fallback.healthPercent)),
+      healthPercent: metric(this.slowCache.storageHealthPercent ?? fallback.healthPercent.value, this.slowCache.storageHealthPercent !== undefined ? 'live' : lastKnownSource(fallback.healthPercent)),
       healthGrade: this.slowCache.storageHealthGrade ?? fallback.healthGrade,
       latencyMs: metric(round(this.diskCounters.latencyMs ?? fallback.latencyMs.value, 2), counterSource(this.diskCounters.latencyMs, fallback.latencyMs)),
       queueDepth: metric(round(this.diskCounters.queueDepth ?? fallback.queueDepth.value, 1), counterSource(this.diskCounters.queueDepth, fallback.queueDepth)),
-      temperatureC: metric(this.slowCache.storageTemperatureC ?? fallback.temperatureC.value, this.slowCache.storageTemperatureC !== undefined && this.slowCache.storageTemperatureC !== null ? 'live' : sourceOf(fallback.temperatureC)),
-      tbwBytes: metric(this.slowCache.storageTbwBytes ?? fallback.tbwBytes.value, this.slowCache.storageTbwBytes !== undefined ? 'live' : sourceOf(fallback.tbwBytes)),
-      tbwLimitBytes: metric(this.slowCache.storageTbwLimitBytes ?? fallback.tbwLimitBytes.value, this.slowCache.storageTbwLimitBytes !== undefined ? 'live' : sourceOf(fallback.tbwLimitBytes)),
-      powerOnHours: metric(this.slowCache.storagePowerOnHours ?? fallback.powerOnHours.value, this.slowCache.storagePowerOnHours !== undefined ? 'live' : sourceOf(fallback.powerOnHours)),
+      temperatureC: metric(this.slowCache.storageTemperatureC ?? this.fanInfo?.ssdTemperatureC ?? fallback.temperatureC.value, this.slowCache.storageTemperatureC !== undefined && this.slowCache.storageTemperatureC !== null ? 'live' : this.fanInfo?.ssdTemperatureC !== null && this.fanInfo?.ssdTemperatureC !== undefined && this.fanSources.ssdTemperatureC !== 'unavailable' ? this.fanSources.ssdTemperatureC : lastKnownSource(fallback.temperatureC)),
+      tbwBytes: metric(this.slowCache.storageTbwBytes ?? fallback.tbwBytes.value, this.slowCache.storageTbwBytes !== undefined ? 'live' : lastKnownSource(fallback.tbwBytes)),
+      tbwLimitBytes: metric(this.slowCache.storageTbwLimitBytes ?? fallback.tbwLimitBytes.value, this.slowCache.storageTbwLimitBytes !== undefined ? 'live' : lastKnownSource(fallback.tbwLimitBytes)),
+      powerOnHours: metric(this.slowCache.storagePowerOnHours ?? fallback.powerOnHours.value, this.slowCache.storagePowerOnHours !== undefined ? 'live' : lastKnownSource(fallback.powerOnHours)),
       activityHistory: this.histories.storageActivity.push(readSource === 'live' ? readActivity : null, writeSource === 'live' ? writeActivity : null),
       activeProcess
     };
@@ -965,12 +984,19 @@ export class SnapshotService {
     const current = this.networkInfo;
     let download = fallback.downloadBytesPerSec;
     let upload = fallback.uploadBytesPerSec;
-    let rateSource: MetricSource = 'unavailable';
+    let rateSource: MetricSource = this.networkRateSource === 'live' || this.networkRateSource === 'fallback' ? 'fallback' : 'unavailable';
+    const directDownload = current?.downloadBytesPerSec;
+    const directUpload = current?.uploadBytesPerSec;
+    const hasDirectRates = directDownload !== null && directDownload !== undefined && directUpload !== null && directUpload !== undefined;
     const receivedBytes = current?.receivedBytes;
     const sentBytes = current?.sentBytes;
     const hasCounters = receivedBytes !== null && receivedBytes !== undefined && sentBytes !== null && sentBytes !== undefined;
 
-    if (hasCounters && this.networkSample) {
+    if (hasDirectRates) {
+      download = directDownload;
+      upload = directUpload;
+      rateSource = 'live';
+    } else if (hasCounters && this.networkSample) {
       const elapsedSeconds = Math.max(0.1, (now - this.networkSample.timestamp) / 1000);
       const receivedDelta = receivedBytes - this.networkSample.receivedBytes;
       const sentDelta = sentBytes - this.networkSample.sentBytes;
@@ -997,17 +1023,17 @@ export class SnapshotService {
       adapterLabel: current?.adapterLabel ?? fallback.adapterLabel,
       downloadBytesPerSec: download,
       uploadBytesPerSec: upload,
-      latencyMs: metric(this.pingSamples.latest() ?? fallback.latencyMs.value, this.pingSamples.size() > 4 ? 'live' : sourceOf(fallback.latencyMs)),
-      jitterMs: metric(round(this.calculateJitter(), 1), this.pingSamples.size() > 4 ? 'live' : sourceOf(fallback.jitterMs)),
+      latencyMs: metric(this.pingSamples.latest() ?? fallback.latencyMs.value, this.pingSamples.size() > 0 ? 'live' : lastKnownSource(fallback.latencyMs)),
+      jitterMs: metric(round(this.calculateJitter(), 1), this.pingSamples.size() > 1 ? 'live' : lastKnownSource(fallback.jitterMs)),
       packetLossPercent: fallback.packetLossPercent,
       signalDbm: metric(previous.network.signalDbm.value, previous.network.signalDbm.source),
       signalLabel: signalLabel(previous.network.signalDbm.value),
       topUsage: this.buildNetworkUsage(topProcesses),
       history: this.histories.network.push(rateSource === 'live' ? clamp(networkMbps(download) / 4) : null, rateSource === 'live' ? clamp(networkMbps(upload) / 2) : null),
-      connections: metric(current?.connections ?? fallback.connections.value, current?.connections !== null && current?.connections !== undefined ? 'live' : sourceOf(fallback.connections)),
-      dns: metric(current?.dns ?? fallback.dns.value, current?.dns ? 'live' : sourceOf(fallback.dns)),
-      ipv4: metric(current?.ipv4 ?? fallback.ipv4.value, current?.ipv4 ? 'live' : sourceOf(fallback.ipv4)),
-      publicIp: metric(this.slowCache.publicIp ?? fallback.publicIp.value, this.slowCache.publicIp ? 'live' : sourceOf(fallback.publicIp))
+      connections: metric(current?.connections ?? fallback.connections.value, current?.connections !== null && current?.connections !== undefined ? 'live' : lastKnownSource(fallback.connections)),
+      dns: metric(current?.dns ?? fallback.dns.value, current?.dns ? 'live' : lastKnownSource(fallback.dns)),
+      ipv4: metric(current?.ipv4 ?? fallback.ipv4.value, current?.ipv4 ? 'live' : lastKnownSource(fallback.ipv4)),
+      publicIp: metric(this.slowCache.publicIp ?? fallback.publicIp.value, this.slowCache.publicIp ? 'live' : lastKnownSource(fallback.publicIp))
     };
   }
 
@@ -1033,7 +1059,7 @@ export class SnapshotService {
         return 'live';
       }
 
-      return sourceOf(fallbackMetric) === 'fallback' ? 'fallback' : 'unavailable';
+      return lastKnownSource(fallbackMetric);
     };
     return {
       ...fallback,
@@ -1068,10 +1094,10 @@ export class SnapshotService {
         return 'live';
       }
 
-      return sourceOf(fallbackMetric) === 'fallback' ? 'fallback' : 'unavailable';
+      return lastKnownSource(fallbackMetric);
     };
-    const cpuFanSource = fanSource(this.fanInfo?.cpuFanRpm, fallback.cpuFanRpm);
-    const gpuFanSource = fanSource(this.fanInfo?.gpuFanRpm, fallback.gpuFanRpm);
+    const cpuFanSource = this.fanSources.cpuFanRpm !== 'unavailable' ? this.fanSources.cpuFanRpm : fanSource(this.fanInfo?.cpuFanRpm, fallback.cpuFanRpm);
+    const gpuFanSource = this.fanSources.gpuFanRpm !== 'unavailable' ? this.fanSources.gpuFanRpm : fanSource(this.fanInfo?.gpuFanRpm, fallback.gpuFanRpm);
     const noise = fallback.noiseLevelDba.value;
     const noiseSource: MetricSource = sourceOf(fallback.noiseLevelDba);
 
@@ -1929,18 +1955,23 @@ export class SnapshotService {
       return;
     }
 
-    this.lastPingRefresh = now;
-    const pingHost = this.networkInfo?.dns;
+    const pingHost = this.networkInfo?.dns ?? this.networkInfo?.gateway;
     if (!pingHost) {
+      if (sourceOf(this.raw.overview.network.packetLossPercent) !== 'unavailable') {
+        this.raw.overview.network.packetLossPercent = metric(this.raw.overview.network.packetLossPercent.value, 'fallback');
+      }
       return;
     }
 
+    this.lastPingRefresh = now;
     const ping = await this.adapter.getPingInfo(pingHost);
     if (ping.latencyMs !== null) {
       this.pingSamples.push(ping.latencyMs);
     }
     if (ping.packetLossPercent !== null) {
       this.raw.overview.network.packetLossPercent = metric(ping.packetLossPercent, 'live');
+    } else if (sourceOf(this.raw.overview.network.packetLossPercent) !== 'unavailable') {
+      this.raw.overview.network.packetLossPercent = metric(this.raw.overview.network.packetLossPercent.value, 'fallback');
     }
   }
 
@@ -1959,7 +1990,39 @@ export class SnapshotService {
     }
 
     this.lastFanRefresh = now;
-    this.fanInfo = await this.adapter.getFanInfo();
+    const nextFanInfo = await this.adapter.getFanInfo();
+    const previousFanInfo = this.fanInfo;
+    const mergeSensorValue = (key: keyof FanInfo): number | null => {
+      const nextValue = nextFanInfo[key];
+      if (nextValue !== null && nextValue !== undefined) {
+        this.fanSources[key] = 'live';
+        return nextValue;
+      }
+
+      const previousValue = previousFanInfo?.[key];
+      if (previousValue !== null && previousValue !== undefined && this.fanSources[key] !== 'unavailable') {
+        this.fanSources[key] = 'fallback';
+        return previousValue;
+      }
+
+      this.fanSources[key] = 'unavailable';
+      return null;
+    };
+
+    this.fanInfo = {
+      cpuFanRpm: mergeSensorValue('cpuFanRpm'),
+      gpuFanRpm: mergeSensorValue('gpuFanRpm'),
+      cpuTemperatureC: mergeSensorValue('cpuTemperatureC'),
+      gpuTemperatureC: mergeSensorValue('gpuTemperatureC'),
+      ssdTemperatureC: mergeSensorValue('ssdTemperatureC'),
+      cpuPackagePowerW: mergeSensorValue('cpuPackagePowerW'),
+      gpuPowerW: mergeSensorValue('gpuPowerW')
+    };
+
+    if (this.fanInfo.cpuTemperatureC !== null && this.fanSources.cpuTemperatureC !== 'unavailable') {
+      this.cpuTemperatureC = this.fanInfo.cpuTemperatureC;
+      this.cpuTemperatureSource = this.fanSources.cpuTemperatureC;
+    }
   }
 
   private async refreshMemoryCache(now: number): Promise<void> {
@@ -1972,8 +2035,8 @@ export class SnapshotService {
     if (cacheBytes !== null) {
       this.memoryCacheBytes = cacheBytes;
       this.memoryCacheSource = 'live';
-    } else if (this.memoryCacheSource === 'live') {
-      this.memoryCacheSource = 'unavailable';
+    } else if (this.memoryCacheSource !== 'unavailable') {
+      this.memoryCacheSource = 'fallback';
     }
   }
 
@@ -1987,8 +2050,11 @@ export class SnapshotService {
     if (temperature !== null) {
       this.cpuTemperatureC = temperature;
       this.cpuTemperatureSource = 'live';
-    } else if (this.cpuTemperatureSource === 'live') {
-      this.cpuTemperatureSource = 'unavailable';
+    } else if (this.fanInfo?.cpuTemperatureC !== null && this.fanInfo?.cpuTemperatureC !== undefined && this.fanSources.cpuTemperatureC !== 'unavailable') {
+      this.cpuTemperatureC = this.fanInfo.cpuTemperatureC;
+      this.cpuTemperatureSource = this.fanSources.cpuTemperatureC;
+    } else if (this.cpuTemperatureC !== null && this.cpuTemperatureSource !== 'unavailable') {
+      this.cpuTemperatureSource = 'fallback';
     }
   }
 
