@@ -38,6 +38,9 @@ export interface CoreUsage {
 
 export interface ProcessMetric {
   pid?: number;
+  identityKey?: string;
+  generation?: number;
+  startTimeMs?: number | null;
   name: string;
   iconHint?: string;
   cpuPercent: number;

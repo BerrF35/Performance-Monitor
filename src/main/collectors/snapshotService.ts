@@ -39,12 +39,23 @@ interface ProcessSample {
 
 interface ProcessState {
   key: string;
+  baseKey: string;
   pid: number;
   name: string;
+  generation: number;
+  startTimeMs: number | null;
   cpuAverage: NumberWindow;
   gpuAverage: NumberWindow;
   lastSeen: number;
   metric: ProcessMetric;
+}
+
+interface ProcessIdentityState {
+  generation: number;
+  startTimeMs: number | null;
+  lastCpuSeconds: number;
+  lastSeen: number;
+  active: boolean;
 }
 
 interface NetworkSample {
@@ -193,9 +204,11 @@ const SLOW_INTERVAL_MS = 12_000;
 const STATIC_INTERVAL_MS = 30_000;
 const PUBLIC_IP_INTERVAL_MS = 90_000;
 const PROCESS_RETENTION_MS = 10_000;
+const PROCESS_IDENTITY_RETENTION_MS = 5 * 60_000;
 const GPU_UNAVAILABLE_CONFIRMATION_SAMPLES = 3;
 const GPU_ZERO_CONFIRMATION_SAMPLES = 2;
-const GPU_SOURCE_LOCK_SAMPLES = 4;
+const GPU_SOURCE_FAILURE_CONFIRMATION_SAMPLES = 3;
+const GPU_SOURCE_VALID_CONFIRMATION_SAMPLES = 4;
 const GPU_OUTLIER_CONFIRMATION_SAMPLES = 2;
 const SAMPLE_WINDOW = 4;
 const GPU_PROCESS_MULTIPLIERS = [0.62, 0.2, 0.12, 0.07] as const;
@@ -381,11 +394,19 @@ function formatProcessName(name: string): string {
   return name.toLowerCase().endsWith('.exe') ? name : `${name}.exe`;
 }
 
-function processKey(pid: number | undefined, name: string): string {
+function processBaseKey(pid: number | undefined, name: string): string {
   return `${pid ?? 'unknown'}:${name.toLowerCase()}`;
 }
 
+function processKey(pid: number | undefined, name: string, generation = 0, startTimeMs?: number | null): string {
+  return `${processBaseKey(pid, name)}:${generation}:${startTimeMs ?? 'unknown'}`;
+}
+
 function processId(process: ProcessMetric | { name: string }, index: number): string {
+  if ('identityKey' in process && process.identityKey) {
+    return process.identityKey;
+  }
+
   return 'pid' in process && process.pid ? processKey(process.pid, process.name) : `${process.name}-${index}`;
 }
 
@@ -396,6 +417,7 @@ export class SnapshotService {
   private snapshot: PerformanceSnapshot;
   private cpuTimes = readCpuTimes();
   private processSamples = new Map<string, ProcessSample>();
+  private processIdentities = new Map<string, ProcessIdentityState>();
   private processStates = new Map<string, ProcessState>();
   private stableTopProcessKeys: string[] = [];
   private processRows: ProcessRow[] = [];
@@ -411,6 +433,7 @@ export class SnapshotService {
   private gpuOutlierSamples = 0;
   private activeGpuProvider: GpuTelemetryProvider = 'unavailable';
   private pendingGpuProvider: GpuTelemetryProvider | null = null;
+  private activeGpuProviderFailureSamples = 0;
   private pendingGpuProviderSamples = 0;
   private gpuProcessSource: MetricSource = 'fallback';
   private networkInfo: NetworkInfo | null = null;
@@ -422,6 +445,11 @@ export class SnapshotService {
   private schedulerTimer: NodeJS.Timeout | null = null;
   private schedulerRunning = false;
   private schedulerStopped = false;
+  private schedulerMaxStartDelayMs = 0;
+  private schedulerMaxExecutionMs = 0;
+  private schedulerMaxDriftMs = 0;
+  private schedulerTotalMissedTicks = 0;
+  private schedulerLastStatsLogMs = 0;
   private lastProcessRefresh = 0;
   private lastGpuRefresh = 0;
   private lastDiskRefresh = 0;
@@ -484,9 +512,10 @@ export class SnapshotService {
     }
 
     this.schedulerRunning = true;
+    const scheduledTickMs = this.expectedNextTickMs;
     const startedMonotonicMs = performance.now();
     const wallNow = Date.now();
-    const startDelayMs = startedMonotonicMs - this.expectedNextTickMs;
+    const startDelayMs = startedMonotonicMs - scheduledTickMs;
     const elapsedSeconds = Math.max(0.1, (startedMonotonicMs - this.lastSnapshotMonotonicMs) / 1000);
 
     if (startDelayMs > SCHEDULER_INTERVAL_MS * 2) {
@@ -570,10 +599,12 @@ export class SnapshotService {
     } finally {
       const completedMonotonicMs = performance.now();
       const executionMs = completedMonotonicMs - startedMonotonicMs;
+      const driftMs = Math.max(0, completedMonotonicMs - scheduledTickMs - SCHEDULER_INTERVAL_MS);
       if (executionMs > SCHEDULER_INTERVAL_MS * 2) {
         console.warn(`[SnapshotService] Scheduler execution took ${Math.round(executionMs)} ms`);
       }
 
+      this.recordSchedulerStats(startDelayMs, executionMs, driftMs, completedMonotonicMs);
       this.schedulerRunning = false;
       if (!this.schedulerStopped) {
         this.advanceExpectedNextTick(completedMonotonicMs);
@@ -585,7 +616,26 @@ export class SnapshotService {
   private advanceExpectedNextTick(now: number): void {
     if (this.expectedNextTickMs <= now) {
       const missedTicks = Math.floor((now - this.expectedNextTickMs) / SCHEDULER_INTERVAL_MS) + 1;
+      this.schedulerTotalMissedTicks += Math.max(0, missedTicks - 1);
       this.expectedNextTickMs += missedTicks * SCHEDULER_INTERVAL_MS;
+    }
+  }
+
+  private recordSchedulerStats(startDelayMs: number, executionMs: number, driftMs: number, now: number): void {
+    this.schedulerMaxStartDelayMs = Math.max(this.schedulerMaxStartDelayMs, startDelayMs);
+    this.schedulerMaxExecutionMs = Math.max(this.schedulerMaxExecutionMs, executionMs);
+    this.schedulerMaxDriftMs = Math.max(this.schedulerMaxDriftMs, driftMs);
+
+    if (this.schedulerLastStatsLogMs === 0) {
+      this.schedulerLastStatsLogMs = now;
+      return;
+    }
+
+    if (now - this.schedulerLastStatsLogMs >= 60_000) {
+      console.info(
+        `[SnapshotService] Scheduler stats: maxStartDelay=${Math.round(this.schedulerMaxStartDelayMs)}ms maxExecution=${Math.round(this.schedulerMaxExecutionMs)}ms maxDrift=${Math.round(this.schedulerMaxDriftMs)}ms missedTicks=${this.schedulerTotalMissedTicks}`
+      );
+      this.schedulerLastStatsLogMs = now;
     }
   }
 
@@ -731,7 +781,7 @@ export class SnapshotService {
     this.gpuProcessSource = utilizationSource === 'live' ? 'estimated' : utilizationSource;
 
     const processes = baseProcesses.map((process, index) => {
-      const key = process.pid ? processKey(process.pid, process.name) : processId(process, index);
+      const key = process.identityKey ?? (process.pid ? processKey(process.pid, process.name) : processId(process, index));
       const state = this.processStates.get(key);
       const instantGpu = round(utilization * (GPU_PROCESS_MULTIPLIERS[index] ?? 0.04), 1);
       if (state && utilizationSource !== 'fallback') {
@@ -1408,10 +1458,12 @@ export class SnapshotService {
 
     const logicalCount = Math.max(1, os.cpus().length);
     const seenKeys = new Set<string>();
+    const seenBaseKeys = new Set<string>();
 
     for (const row of rows) {
       const name = formatProcessName(row.name);
-      const key = processKey(row.pid, name);
+      const identity = this.resolveProcessIdentity(row, name, now);
+      const key = identity.key;
       const previous = this.processSamples.get(key);
       const elapsedSeconds = previous ? Math.max(0.1, (now - previous.timestamp) / 1000) : MEDIUM_INTERVAL_MS / 1000;
       const cpuDelta = previous ? Math.max(0, row.cpuSeconds - previous.cpuSeconds) : 0;
@@ -1422,6 +1474,9 @@ export class SnapshotService {
       cpuAverage.push(instantCpu);
       const metricRow: ProcessMetric = {
         pid: row.pid,
+        identityKey: key,
+        generation: identity.generation,
+        startTimeMs: identity.startTimeMs,
         name,
         cpuPercent: movingAverage(cpuAverage),
         memoryBytes: row.workingSetBytes,
@@ -1429,10 +1484,14 @@ export class SnapshotService {
       };
 
       seenKeys.add(key);
+      seenBaseKeys.add(identity.baseKey);
       this.processStates.set(key, {
         key,
+        baseKey: identity.baseKey,
         pid: row.pid,
         name,
+        generation: identity.generation,
+        startTimeMs: identity.startTimeMs,
         cpuAverage,
         gpuAverage,
         lastSeen: now,
@@ -1446,6 +1505,17 @@ export class SnapshotService {
       }
     }
 
+    for (const [baseKey, identity] of this.processIdentities) {
+      if (seenBaseKeys.has(baseKey)) {
+        continue;
+      }
+
+      identity.active = false;
+      if (now - identity.lastSeen > PROCESS_IDENTITY_RETENTION_MS) {
+        this.processIdentities.delete(baseKey);
+      }
+    }
+
     for (const key of this.processSamples.keys()) {
       if (!seenKeys.has(key)) {
         this.processSamples.delete(key);
@@ -1453,12 +1523,44 @@ export class SnapshotService {
     }
 
     for (const row of rows) {
-      this.processSamples.set(processKey(row.pid, formatProcessName(row.name)), { cpuSeconds: row.cpuSeconds, timestamp: now });
+      const name = formatProcessName(row.name);
+      const identity = this.processIdentities.get(processBaseKey(row.pid, name));
+      const key = processKey(row.pid, name, identity?.generation ?? 0, identity?.startTimeMs ?? row.startTimeMs);
+      this.processSamples.set(key, { cpuSeconds: row.cpuSeconds, timestamp: now });
     }
 
     this.stableTopProcessKeys = this.stableTopProcessKeys.filter((key) => this.processStates.has(key));
     this.processRows = rows;
     this.processMetrics = this.selectStableTopProcesses(now);
+  }
+
+  private resolveProcessIdentity(row: ProcessRow, name: string, now: number): { baseKey: string; key: string; generation: number; startTimeMs: number | null } {
+    const baseKey = processBaseKey(row.pid, name);
+    const identity = this.processIdentities.get(baseKey);
+    let generation = identity?.generation ?? 0;
+    const startTimeChanged = identity?.startTimeMs !== null && row.startTimeMs !== null && identity?.startTimeMs !== row.startTimeMs;
+    const cpuCounterReset = identity !== undefined && row.cpuSeconds + 0.001 < identity.lastCpuSeconds;
+    const processReappeared = identity !== undefined && !identity.active;
+
+    if (startTimeChanged || cpuCounterReset || processReappeared) {
+      generation += 1;
+    }
+
+    const startTimeMs = row.startTimeMs ?? (processReappeared || cpuCounterReset ? null : identity?.startTimeMs ?? null);
+    this.processIdentities.set(baseKey, {
+      generation,
+      startTimeMs,
+      lastCpuSeconds: row.cpuSeconds,
+      lastSeen: now,
+      active: true
+    });
+
+    return {
+      baseKey,
+      key: processKey(row.pid, name, generation, startTimeMs),
+      generation,
+      startTimeMs
+    };
   }
 
   private selectStableTopProcesses(now: number): ProcessMetric[] {
@@ -1507,18 +1609,25 @@ export class SnapshotService {
     }
 
     if (this.activeGpuProvider === 'unavailable') {
-      this.activeGpuProvider = provider;
-      this.pendingGpuProvider = null;
-      this.pendingGpuProviderSamples = 0;
-      return true;
+      return this.acceptPendingGpuProvider(provider);
     }
 
     if (provider === this.activeGpuProvider) {
       this.pendingGpuProvider = null;
       this.pendingGpuProviderSamples = 0;
+      this.activeGpuProviderFailureSamples = 0;
       return true;
     }
 
+    this.activeGpuProviderFailureSamples += 1;
+    if (this.activeGpuProviderFailureSamples < GPU_SOURCE_FAILURE_CONFIRMATION_SAMPLES) {
+      return false;
+    }
+
+    return this.acceptPendingGpuProvider(provider);
+  }
+
+  private acceptPendingGpuProvider(provider: GpuTelemetryProvider): boolean {
     if (this.pendingGpuProvider !== provider) {
       this.pendingGpuProvider = provider;
       this.pendingGpuProviderSamples = 1;
@@ -1526,13 +1635,14 @@ export class SnapshotService {
     }
 
     this.pendingGpuProviderSamples += 1;
-    if (this.pendingGpuProviderSamples < GPU_SOURCE_LOCK_SAMPLES) {
+    if (this.pendingGpuProviderSamples < GPU_SOURCE_VALID_CONFIRMATION_SAMPLES) {
       return false;
     }
 
     this.activeGpuProvider = provider;
     this.pendingGpuProvider = null;
     this.pendingGpuProviderSamples = 0;
+    this.activeGpuProviderFailureSamples = 0;
     return true;
   }
 
@@ -1609,6 +1719,7 @@ export class SnapshotService {
         this.activeGpuProvider = 'unavailable';
         this.pendingGpuProvider = null;
         this.pendingGpuProviderSamples = 0;
+        this.activeGpuProviderFailureSamples = 0;
       }
       this.gpuInfo = this.gpuUnavailableSamples >= GPU_UNAVAILABLE_CONFIRMATION_SAMPLES || this.lastValidGpuInfo ? this.unavailableGpuInfo(gpuInfo) : gpuInfo;
       return;

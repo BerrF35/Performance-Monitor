@@ -17,6 +17,7 @@ export interface ProcessRow {
   cpuSeconds: number;
   workingSetBytes: number;
   threadCount: number;
+  startTimeMs: number | null;
 }
 
 export interface GpuInfo {
@@ -198,7 +199,7 @@ export class WindowsMetricsAdapter {
 
   async getProcesses(): Promise<ProcessRow[]> {
     const raw = await runPowerShellJson<unknown>(
-      'Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64,@{Name="ThreadCount";Expression={$_.Threads.Count}}',
+      'Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64,@{Name="ThreadCount";Expression={$_.Threads.Count}},@{Name="StartTimeUtc";Expression={try {$_.StartTime.ToUniversalTime().ToString("o")} catch {$null}}}',
       4500
     );
     const rows = Array.isArray(raw) ? raw : raw ? [raw] : [];
@@ -211,7 +212,8 @@ export class WindowsMetricsAdapter {
           name: typeof record?.ProcessName === 'string' ? record.ProcessName : 'Unknown',
           cpuSeconds: toNumber(record?.CPU) ?? 0,
           workingSetBytes: toNumber(record?.WorkingSet64) ?? 0,
-          threadCount: toNumber(record?.ThreadCount) ?? 0
+          threadCount: toNumber(record?.ThreadCount) ?? 0,
+          startTimeMs: typeof record?.StartTimeUtc === 'string' ? Date.parse(record.StartTimeUtc) : null
         };
       })
       .filter((row) => row.pid > 0);
