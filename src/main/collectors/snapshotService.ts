@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { performance } from 'node:perf_hooks';
 import type {
   CoreUsage,
   DisplayAlertItem,
@@ -40,8 +41,8 @@ interface ProcessState {
   key: string;
   pid: number;
   name: string;
-  cpuSamples: number[];
-  gpuSamples: number[];
+  cpuAverage: NumberWindow;
+  gpuAverage: NumberWindow;
   lastSeen: number;
   metric: ProcessMetric;
 }
@@ -77,44 +78,110 @@ interface SlowCache {
 }
 
 class HistoryRingBuffer {
-  private points: TimePoint[];
+  private readonly points: TimePoint[];
+  private readonly orderedPoints: TimePoint[];
+  private nextIndex = 0;
+  private lastTimestamp: number;
 
   constructor(
     private readonly length: number,
     private readonly stepMs: number,
     seed: TimePoint[]
   ) {
-    const normalizedSeed = seed.slice(-length);
-    const seedEnd = normalizedSeed.at(-1)?.timestamp ?? Date.now();
-    const filler = normalizedSeed[0] ?? { timestamp: seedEnd, value: 0 };
-    this.points = [
-      ...Array.from({ length: Math.max(0, length - normalizedSeed.length) }, (_, index) => {
-        const missingCount = length - normalizedSeed.length;
-        return {
-          ...filler,
-          timestamp: seedEnd - (missingCount - index + normalizedSeed.length - 1) * stepMs
-        };
-      }),
-      ...normalizedSeed
-    ].map((point, index, points) => ({
-      ...point,
-      timestamp: seedEnd - (points.length - index - 1) * stepMs
-    }));
+    const seedCount = Math.min(seed.length, length);
+    const seedOffset = Math.max(0, seed.length - length);
+    const seedEnd = seed[seed.length - 1]?.timestamp ?? Date.now();
+    const filler = seed[seedOffset] ?? { timestamp: seedEnd, value: 0, secondary: undefined };
+    const startTimestamp = seedEnd - (length - 1) * stepMs;
+
+    this.points = Array.from({ length }, (_, index) => {
+      const seedIndex = index - (length - seedCount);
+      const point = seedIndex >= 0 ? seed[seedOffset + seedIndex] : filler;
+
+      return {
+        timestamp: startTimestamp + index * stepMs,
+        value: point.value,
+        secondary: point.secondary
+      };
+    });
+    this.orderedPoints = [...this.points];
+    this.lastTimestamp = seedEnd;
   }
 
   push(value: number, secondary?: number): TimePoint[] {
-    const lastTimestamp = this.points.at(-1)?.timestamp ?? Date.now();
-    this.points.push({ timestamp: lastTimestamp + this.stepMs, value, secondary });
-
-    while (this.points.length > this.length) {
-      this.points.shift();
-    }
+    const point = this.points[this.nextIndex];
+    this.lastTimestamp += this.stepMs;
+    point.timestamp = this.lastTimestamp;
+    point.value = value;
+    point.secondary = secondary;
+    this.nextIndex = (this.nextIndex + 1) % this.length;
+    this.reorder();
 
     return this.series();
   }
 
   series(): TimePoint[] {
-    return this.points.map((point) => ({ ...point }));
+    return this.orderedPoints;
+  }
+
+  private reorder(): void {
+    for (let index = 0; index < this.length; index += 1) {
+      this.orderedPoints[index] = this.points[(this.nextIndex + index) % this.length];
+    }
+  }
+}
+
+class NumberWindow {
+  private readonly values: number[];
+  private nextIndex = 0;
+  private count = 0;
+  private sum = 0;
+
+  constructor(private readonly length: number, seed: number[] = []) {
+    this.values = Array.from({ length }, () => 0);
+    for (const value of seed.slice(-length)) {
+      this.push(value);
+    }
+  }
+
+  push(value: number): void {
+    if (this.count < this.length) {
+      this.values[this.nextIndex] = value;
+      this.sum += value;
+      this.count += 1;
+    } else {
+      this.sum -= this.values[this.nextIndex];
+      this.values[this.nextIndex] = value;
+      this.sum += value;
+    }
+
+    this.nextIndex = (this.nextIndex + 1) % this.length;
+  }
+
+  average(): number {
+    return this.count ? this.sum / this.count : 0;
+  }
+
+  latest(): number | null {
+    if (!this.count) {
+      return null;
+    }
+
+    const latestIndex = (this.nextIndex - 1 + this.length) % this.length;
+    return this.values[latestIndex];
+  }
+
+  size(): number {
+    return this.count;
+  }
+
+  at(index: number): number | null {
+    if (index < 0 || index >= this.count) {
+      return null;
+    }
+
+    const start = this.count < this.length ? 0 : this.nextIndex;
+    return this.values[(start + index) % this.length];
   }
 }
 
@@ -128,7 +195,11 @@ const PUBLIC_IP_INTERVAL_MS = 90_000;
 const PROCESS_RETENTION_MS = 10_000;
 const GPU_UNAVAILABLE_CONFIRMATION_SAMPLES = 3;
 const GPU_ZERO_CONFIRMATION_SAMPLES = 2;
+const GPU_SOURCE_LOCK_SAMPLES = 4;
+const GPU_OUTLIER_CONFIRMATION_SAMPLES = 2;
 const SAMPLE_WINDOW = 4;
+const GPU_PROCESS_MULTIPLIERS = [0.62, 0.2, 0.12, 0.07] as const;
+type GpuTelemetryProvider = GpuInfo['provider'];
 
 const clamp = (value: number, min = 0, max = 100): number => Math.max(min, Math.min(max, value));
 const round = (value: number, digits = 0): number => Number(value.toFixed(digits));
@@ -172,12 +243,8 @@ function displayLabel(source: MetricSource, label: string): string {
   return source === 'unavailable' ? DASH : label;
 }
 
-function pushSample(samples: number[], value: number, size = SAMPLE_WINDOW): number[] {
-  return [...samples, value].slice(-size);
-}
-
-function movingAverage(samples: number[]): number {
-  return round(average(samples), 1);
+function movingAverage(window: NumberWindow): number {
+  return round(window.average(), 1);
 }
 
 function safePercent(numerator: number, denominator: number): number {
@@ -328,25 +395,30 @@ export class SnapshotService {
   private readonly histories = this.createHistoryBuffers(this.raw.overview);
   private snapshot: PerformanceSnapshot;
   private cpuTimes = readCpuTimes();
-  private processSamples = new Map<number, ProcessSample>();
+  private processSamples = new Map<string, ProcessSample>();
   private processStates = new Map<string, ProcessState>();
   private stableTopProcessKeys: string[] = [];
   private processRows: ProcessRow[] = [];
   private processMetrics: ProcessMetric[] = this.raw.overview.topProcesses;
   private networkSample: NetworkSample | null = null;
-  private pingSamples: number[] = [12, 13, 11, 14];
+  private readonly pingSamples = new NumberWindow(8, [12, 13, 11, 14]);
   private batteryInfo: BatteryInfo | null = null;
   private fanInfo: FanInfo | null = null;
   private gpuInfo: GpuInfo | null = null;
   private lastValidGpuInfo: GpuInfo | null = null;
   private gpuUnavailableSamples = 0;
   private gpuZeroSamples = 0;
+  private gpuOutlierSamples = 0;
+  private activeGpuProvider: GpuTelemetryProvider = 'unavailable';
+  private pendingGpuProvider: GpuTelemetryProvider | null = null;
+  private pendingGpuProviderSamples = 0;
   private gpuProcessSource: MetricSource = 'fallback';
   private networkInfo: NetworkInfo | null = null;
   private networkRateSource: MetricSource = 'fallback';
   private diskReadsSinceLaunch = this.raw.overview.footer.totalDataReadBytes.value;
   private diskWritesSinceLaunch = this.raw.overview.footer.totalDataWrittenBytes.value;
-  private lastSnapshotAt = Date.now();
+  private lastSnapshotMonotonicMs = performance.now();
+  private expectedNextTickMs = this.lastSnapshotMonotonicMs;
   private schedulerTimer: NodeJS.Timeout | null = null;
   private schedulerRunning = false;
   private schedulerStopped = false;
@@ -376,6 +448,8 @@ export class SnapshotService {
 
   constructor() {
     this.snapshot = this.composeSnapshot(this.raw);
+    this.lastSnapshotMonotonicMs = performance.now();
+    this.expectedNextTickMs = this.lastSnapshotMonotonicMs;
     void this.runSchedulerCycle();
   }
 
@@ -397,9 +471,10 @@ export class SnapshotService {
       return;
     }
 
+    const delayMs = Math.max(0, this.expectedNextTickMs - performance.now());
     this.schedulerTimer = setTimeout(() => {
       void this.runSchedulerCycle();
-    }, SCHEDULER_INTERVAL_MS);
+    }, delayMs);
     this.schedulerTimer.unref?.();
   }
 
@@ -409,36 +484,42 @@ export class SnapshotService {
     }
 
     this.schedulerRunning = true;
-    const now = Date.now();
-    const elapsedSeconds = Math.max(0.1, (now - this.lastSnapshotAt) / 1000);
+    const startedMonotonicMs = performance.now();
+    const wallNow = Date.now();
+    const startDelayMs = startedMonotonicMs - this.expectedNextTickMs;
+    const elapsedSeconds = Math.max(0.1, (startedMonotonicMs - this.lastSnapshotMonotonicMs) / 1000);
+
+    if (startDelayMs > SCHEDULER_INTERVAL_MS * 2) {
+      console.warn(`[SnapshotService] Scheduler start delayed by ${Math.round(startDelayMs)} ms`);
+    }
 
     try {
       await Promise.all([
-        this.refreshStatic(now),
-        this.refreshProcesses(now),
-        this.refreshGpu(now),
-        this.refreshDisk(now),
-        this.refreshNetwork(now),
-        this.refreshPing(now),
-        this.refreshBattery(now),
-        this.refreshFans(now),
-        this.refreshMemoryCache(now),
-        this.refreshCpuTemperature(now)
+        this.refreshStatic(startedMonotonicMs),
+        this.refreshProcesses(startedMonotonicMs),
+        this.refreshGpu(startedMonotonicMs),
+        this.refreshDisk(startedMonotonicMs),
+        this.refreshNetwork(startedMonotonicMs),
+        this.refreshPing(startedMonotonicMs),
+        this.refreshBattery(startedMonotonicMs),
+        this.refreshFans(startedMonotonicMs),
+        this.refreshMemoryCache(startedMonotonicMs),
+        this.refreshCpuTemperature(startedMonotonicMs)
       ]);
 
       const previous = this.raw.overview;
-      const cpu = this.buildCpu(now, previous);
+      const cpu = this.buildCpu(startedMonotonicMs, previous);
       let topProcesses = this.processMetrics.length ? this.processMetrics : previous.topProcesses;
-      const ram = this.buildRam(now, previous);
-      const gpu = this.buildGpu(now, previous, topProcesses);
+      const ram = this.buildRam(previous);
+      const gpu = this.buildGpu(startedMonotonicMs, previous, topProcesses);
       topProcesses = this.processMetrics.length ? this.processMetrics : topProcesses;
-      const storage = this.buildStorage(now, elapsedSeconds, previous, topProcesses);
-      const network = this.buildNetwork(now, previous, topProcesses);
-      const powerBattery = this.buildPowerBattery(now, previous, cpu.packagePowerW.value, gpu.powerDrawW.value);
-      const thermalsFans = this.buildThermalsFans(now, previous, cpu.temperatureC, gpu.temperatureC, storage.temperatureC);
-      const systemHealth = this.buildSystemHealth(now, previous, cpu.temperatureC.value, gpu.temperatureC.value, storage.healthPercent.value);
-      const systemInformation = this.buildSystemInformation(now, previous);
-      const trends = this.buildTrends(now, cpu.utilizationPercent, gpu.utilizationPercent.value, ram.inUsePercent, storage);
+      const storage = this.buildStorage(elapsedSeconds, previous, topProcesses);
+      const network = this.buildNetwork(startedMonotonicMs, previous, topProcesses);
+      const powerBattery = this.buildPowerBattery(startedMonotonicMs, previous, cpu.packagePowerW.value, gpu.powerDrawW.value);
+      const thermalsFans = this.buildThermalsFans(previous, cpu.temperatureC, gpu.temperatureC, storage.temperatureC);
+      const systemHealth = this.buildSystemHealth(wallNow, previous, cpu.temperatureC.value, gpu.temperatureC.value, storage.healthPercent.value);
+      const systemInformation = this.buildSystemInformation(wallNow, previous);
+      const trends = this.buildTrends(startedMonotonicMs, cpu.utilizationPercent, gpu.utilizationPercent.value, ram.inUsePercent, storage);
       ram.trendHistory = this.histories.ramTrend.series();
       const footer = this.buildFooter(cpu.utilizationPercent, gpu.utilizationPercent.value, ram.inUsePercent, storage, network, systemHealth);
       const powerMode = this.slowCache.powerMode ?? this.raw.chips[1]?.value ?? 'Balanced';
@@ -467,7 +548,7 @@ export class SnapshotService {
       ];
 
       this.raw = {
-        timestamp: now,
+        timestamp: wallNow,
         chips,
         overview: {
           cpu,
@@ -485,12 +566,26 @@ export class SnapshotService {
         }
       };
       this.snapshot = this.composeSnapshot(this.raw);
-      this.lastSnapshotAt = now;
+      this.lastSnapshotMonotonicMs = startedMonotonicMs;
     } finally {
+      const completedMonotonicMs = performance.now();
+      const executionMs = completedMonotonicMs - startedMonotonicMs;
+      if (executionMs > SCHEDULER_INTERVAL_MS * 2) {
+        console.warn(`[SnapshotService] Scheduler execution took ${Math.round(executionMs)} ms`);
+      }
+
       this.schedulerRunning = false;
       if (!this.schedulerStopped) {
+        this.advanceExpectedNextTick(completedMonotonicMs);
         this.scheduleNextCycle();
       }
+    }
+  }
+
+  private advanceExpectedNextTick(now: number): void {
+    if (this.expectedNextTickMs <= now) {
+      const missedTicks = Math.floor((now - this.expectedNextTickMs) / SCHEDULER_INTERVAL_MS) + 1;
+      this.expectedNextTickMs += missedTicks * SCHEDULER_INTERVAL_MS;
     }
   }
 
@@ -526,7 +621,7 @@ export class SnapshotService {
     };
   }
 
-  private buildCpu(now: number, previous: OverviewCards) {
+  private buildCpu(_now: number, previous: OverviewCards) {
     const previousTimes = this.cpuTimes;
     const currentTimes = readCpuTimes();
     const perLogicalCore = currentTimes.map((current, index) => cpuPercentFromDelta(previousTimes[index] ?? current, current));
@@ -633,15 +728,16 @@ export class SnapshotService {
 
   private buildGpuProcesses(now: number, topProcesses: ProcessMetric[], utilization: number, utilizationSource: MetricSource): ProcessMetric[] {
     const baseProcesses = topProcesses.slice(0, 4);
-    const multipliers = [0.62, 0.2, 0.12, 0.07];
     this.gpuProcessSource = utilizationSource === 'live' ? 'estimated' : utilizationSource;
 
     const processes = baseProcesses.map((process, index) => {
       const key = process.pid ? processKey(process.pid, process.name) : processId(process, index);
       const state = this.processStates.get(key);
-      const instantGpu = round(utilization * (multipliers[index] ?? 0.04), 1);
-      const gpuSamples = utilizationSource === 'fallback' ? state?.gpuSamples ?? [] : pushSample(state?.gpuSamples ?? [], instantGpu);
-      const gpuPercent = gpuSamples.length ? movingAverage(gpuSamples) : process.gpuPercent;
+      const instantGpu = round(utilization * (GPU_PROCESS_MULTIPLIERS[index] ?? 0.04), 1);
+      if (state && utilizationSource !== 'fallback') {
+        state.gpuAverage.push(instantGpu);
+      }
+      const gpuPercent = state?.gpuAverage.size() ? movingAverage(state.gpuAverage) : process.gpuPercent;
 
       if (state) {
         const metricRow = {
@@ -653,7 +749,6 @@ export class SnapshotService {
 
         this.processStates.set(key, {
           ...state,
-          gpuSamples,
           lastSeen: now,
           metric: metricRow
         });
@@ -672,7 +767,7 @@ export class SnapshotService {
     return processes;
   }
 
-  private buildRam(now: number, previous: OverviewCards) {
+  private buildRam(previous: OverviewCards) {
     const total = os.totalmem();
     const free = os.freemem();
     const used = total - free;
@@ -701,7 +796,7 @@ export class SnapshotService {
     };
   }
 
-  private buildStorage(now: number, elapsedSeconds: number, previous: OverviewCards, topProcesses: ProcessMetric[]) {
+  private buildStorage(elapsedSeconds: number, previous: OverviewCards, topProcesses: ProcessMetric[]) {
     const fallback = previous.storage;
     const readBytesPerSec = this.diskCounters.readBytesPerSec ?? fallback.readBytesPerSec.value;
     const writeBytesPerSec = this.diskCounters.writeBytesPerSec ?? fallback.writeBytesPerSec.value;
@@ -785,8 +880,8 @@ export class SnapshotService {
       adapterLabel: current?.adapterLabel ?? fallback.adapterLabel,
       downloadBytesPerSec: download,
       uploadBytesPerSec: upload,
-      latencyMs: metric(this.pingSamples.at(-1) ?? fallback.latencyMs.value, this.pingSamples.length > 4 ? 'live' : 'fallback'),
-      jitterMs: metric(round(this.calculateJitter(), 1), this.pingSamples.length > 4 ? 'live' : 'fallback'),
+      latencyMs: metric(this.pingSamples.latest() ?? fallback.latencyMs.value, this.pingSamples.size() > 4 ? 'live' : 'fallback'),
+      jitterMs: metric(round(this.calculateJitter(), 1), this.pingSamples.size() > 4 ? 'live' : 'fallback'),
       packetLossPercent: fallback.packetLossPercent,
       signalDbm: metric(previous.network.signalDbm.value, previous.network.signalDbm.source),
       signalLabel: signalLabel(previous.network.signalDbm.value),
@@ -843,7 +938,6 @@ export class SnapshotService {
   }
 
   private buildThermalsFans(
-    now: number,
     previous: OverviewCards,
     cpuTemperature: MetricValue<number | null>,
     gpuTemperature: MetricValue<number | null>,
@@ -1268,7 +1362,7 @@ export class SnapshotService {
   }
 
   private async refreshStatic(now: number): Promise<void> {
-    if (!isWindows || now - this.slowCache.lastStaticRefresh < STATIC_INTERVAL_MS) {
+    if (!isWindows || (this.slowCache.lastStaticRefresh !== 0 && now - this.slowCache.lastStaticRefresh < STATIC_INTERVAL_MS)) {
       return;
     }
 
@@ -1295,38 +1389,43 @@ export class SnapshotService {
       powerMode: powerMode ?? this.slowCache.powerMode
     };
 
-    if (now - this.slowCache.lastPublicIpRefresh > PUBLIC_IP_INTERVAL_MS) {
+    if (this.slowCache.lastPublicIpRefresh === 0 || now - this.slowCache.lastPublicIpRefresh > PUBLIC_IP_INTERVAL_MS) {
       this.slowCache.lastPublicIpRefresh = now;
       this.slowCache.publicIp = (await this.adapter.getPublicIp()) ?? this.slowCache.publicIp;
     }
   }
 
   private async refreshProcesses(now: number): Promise<void> {
-    if (!isWindows || now - this.lastProcessRefresh < MEDIUM_INTERVAL_MS) {
+    if (!isWindows || (this.lastProcessRefresh !== 0 && now - this.lastProcessRefresh < MEDIUM_INTERVAL_MS)) {
       return;
     }
 
     this.lastProcessRefresh = now;
     const rows = await this.adapter.getProcesses();
+    if (!rows.length) {
+      return;
+    }
+
     const logicalCount = Math.max(1, os.cpus().length);
     const seenKeys = new Set<string>();
 
     for (const row of rows) {
-      const previous = this.processSamples.get(row.pid);
-      const elapsedSeconds = previous ? Math.max(0.1, (now - previous.timestamp) / 1000) : MEDIUM_INTERVAL_MS / 1000;
-      const cpuDelta = previous ? Math.max(0, row.cpuSeconds - previous.cpuSeconds) : 0;
       const name = formatProcessName(row.name);
       const key = processKey(row.pid, name);
+      const previous = this.processSamples.get(key);
+      const elapsedSeconds = previous ? Math.max(0.1, (now - previous.timestamp) / 1000) : MEDIUM_INTERVAL_MS / 1000;
+      const cpuDelta = previous ? Math.max(0, row.cpuSeconds - previous.cpuSeconds) : 0;
       const existing = this.processStates.get(key);
       const instantCpu = round((cpuDelta / elapsedSeconds / logicalCount) * 100, 1);
-      const cpuSamples = pushSample(existing?.cpuSamples ?? [], instantCpu);
-      const gpuSamples = existing?.gpuSamples ?? [];
+      const cpuAverage = existing?.cpuAverage ?? new NumberWindow(SAMPLE_WINDOW);
+      const gpuAverage = existing?.gpuAverage ?? new NumberWindow(SAMPLE_WINDOW);
+      cpuAverage.push(instantCpu);
       const metricRow: ProcessMetric = {
         pid: row.pid,
         name,
-        cpuPercent: movingAverage(cpuSamples),
+        cpuPercent: movingAverage(cpuAverage),
         memoryBytes: row.workingSetBytes,
-        gpuPercent: movingAverage(gpuSamples)
+        gpuPercent: movingAverage(gpuAverage)
       };
 
       seenKeys.add(key);
@@ -1334,20 +1433,30 @@ export class SnapshotService {
         key,
         pid: row.pid,
         name,
-        cpuSamples,
-        gpuSamples,
+        cpuAverage,
+        gpuAverage,
         lastSeen: now,
         metric: metricRow
       });
     }
 
     for (const [key, state] of this.processStates) {
-      if (!seenKeys.has(key) && now - state.lastSeen > PROCESS_RETENTION_MS) {
+      if (!seenKeys.has(key)) {
         this.processStates.delete(key);
       }
     }
 
-    this.processSamples = new Map(rows.map((row) => [row.pid, { cpuSeconds: row.cpuSeconds, timestamp: now }]));
+    for (const key of this.processSamples.keys()) {
+      if (!seenKeys.has(key)) {
+        this.processSamples.delete(key);
+      }
+    }
+
+    for (const row of rows) {
+      this.processSamples.set(processKey(row.pid, formatProcessName(row.name)), { cpuSeconds: row.cpuSeconds, timestamp: now });
+    }
+
+    this.stableTopProcessKeys = this.stableTopProcessKeys.filter((key) => this.processStates.has(key));
     this.processRows = rows;
     this.processMetrics = this.selectStableTopProcesses(now);
   }
@@ -1392,6 +1501,66 @@ export class SnapshotService {
     );
   }
 
+  private acceptGpuProvider(provider: GpuTelemetryProvider): boolean {
+    if (provider === 'unavailable') {
+      return false;
+    }
+
+    if (this.activeGpuProvider === 'unavailable') {
+      this.activeGpuProvider = provider;
+      this.pendingGpuProvider = null;
+      this.pendingGpuProviderSamples = 0;
+      return true;
+    }
+
+    if (provider === this.activeGpuProvider) {
+      this.pendingGpuProvider = null;
+      this.pendingGpuProviderSamples = 0;
+      return true;
+    }
+
+    if (this.pendingGpuProvider !== provider) {
+      this.pendingGpuProvider = provider;
+      this.pendingGpuProviderSamples = 1;
+      return false;
+    }
+
+    this.pendingGpuProviderSamples += 1;
+    if (this.pendingGpuProviderSamples < GPU_SOURCE_LOCK_SAMPLES) {
+      return false;
+    }
+
+    this.activeGpuProvider = provider;
+    this.pendingGpuProvider = null;
+    this.pendingGpuProviderSamples = 0;
+    return true;
+  }
+
+  private isGpuOutlier(gpuInfo: GpuInfo): boolean {
+    const cached = this.lastValidGpuInfo;
+    if (!cached) {
+      return false;
+    }
+
+    if (gpuInfo.vramUsedBytes !== null && gpuInfo.vramTotalBytes !== null && gpuInfo.vramUsedBytes > gpuInfo.vramTotalBytes * 1.05) {
+      return true;
+    }
+
+    if (gpuInfo.utilizationPercent !== null && cached.utilizationPercent !== null && Math.abs(gpuInfo.utilizationPercent - cached.utilizationPercent) > 75) {
+      return true;
+    }
+
+    if (gpuInfo.temperatureC !== null && cached.temperatureC !== null && Math.abs(gpuInfo.temperatureC - cached.temperatureC) > 35) {
+      return true;
+    }
+
+    if (gpuInfo.powerDrawW !== null && cached.powerDrawW !== null && Math.abs(gpuInfo.powerDrawW - cached.powerDrawW) > 140) {
+      return true;
+    }
+
+    return false;
+  }
+
   private mergeGpuCache(gpuInfo: GpuInfo): GpuInfo {
     const cached = this.lastValidGpuInfo;
 
@@ -1427,7 +1596,7 @@ export class SnapshotService {
   }
 
   private async refreshGpu(now: number): Promise<void> {
-    if (!isWindows || now - this.lastGpuRefresh < FAST_INTERVAL_MS) {
+    if (!isWindows || (this.lastGpuRefresh !== 0 && now - this.lastGpuRefresh < FAST_INTERVAL_MS)) {
       return;
     }
 
@@ -1436,11 +1605,31 @@ export class SnapshotService {
 
     if (!this.hasGpuTelemetry(gpuInfo)) {
       this.gpuUnavailableSamples += 1;
+      if (this.gpuUnavailableSamples >= GPU_UNAVAILABLE_CONFIRMATION_SAMPLES) {
+        this.activeGpuProvider = 'unavailable';
+        this.pendingGpuProvider = null;
+        this.pendingGpuProviderSamples = 0;
+      }
       this.gpuInfo = this.gpuUnavailableSamples >= GPU_UNAVAILABLE_CONFIRMATION_SAMPLES || this.lastValidGpuInfo ? this.unavailableGpuInfo(gpuInfo) : gpuInfo;
       return;
     }
 
     this.gpuUnavailableSamples = 0;
+    if (!this.acceptGpuProvider(gpuInfo.provider)) {
+      this.gpuInfo = this.unavailableGpuInfo(gpuInfo);
+      return;
+    }
+
+    if (this.isGpuOutlier(gpuInfo)) {
+      this.gpuOutlierSamples += 1;
+      if (this.gpuOutlierSamples < GPU_OUTLIER_CONFIRMATION_SAMPLES) {
+        this.gpuInfo = this.unavailableGpuInfo(gpuInfo);
+        return;
+      }
+    } else {
+      this.gpuOutlierSamples = 0;
+    }
+
     const mergedGpuInfo = this.mergeGpuCache(gpuInfo);
     const previousUtilization = this.lastValidGpuInfo?.utilizationPercent;
 
@@ -1459,7 +1648,7 @@ export class SnapshotService {
   }
 
   private async refreshDisk(now: number): Promise<void> {
-    if (!isWindows || now - this.lastDiskRefresh < MEDIUM_INTERVAL_MS) {
+    if (!isWindows || (this.lastDiskRefresh !== 0 && now - this.lastDiskRefresh < MEDIUM_INTERVAL_MS)) {
       return;
     }
 
@@ -1468,7 +1657,7 @@ export class SnapshotService {
   }
 
   private async refreshNetwork(now: number): Promise<void> {
-    if (!isWindows || now - this.lastNetworkRefresh < MEDIUM_INTERVAL_MS) {
+    if (!isWindows || (this.lastNetworkRefresh !== 0 && now - this.lastNetworkRefresh < MEDIUM_INTERVAL_MS)) {
       return;
     }
 
@@ -1481,14 +1670,14 @@ export class SnapshotService {
   }
 
   private async refreshPing(now: number): Promise<void> {
-    if (!isWindows || now - this.lastPingRefresh < SLOW_INTERVAL_MS) {
+    if (!isWindows || (this.lastPingRefresh !== 0 && now - this.lastPingRefresh < SLOW_INTERVAL_MS)) {
       return;
     }
 
     this.lastPingRefresh = now;
     const ping = await this.adapter.getPingInfo();
     if (ping.latencyMs !== null) {
-      this.pingSamples = [...this.pingSamples.slice(-7), ping.latencyMs];
+      this.pingSamples.push(ping.latencyMs);
     }
     if (ping.packetLossPercent !== null) {
       this.raw.overview.network.packetLossPercent = metric(ping.packetLossPercent, 'live');
@@ -1496,7 +1685,7 @@ export class SnapshotService {
   }
 
   private async refreshBattery(now: number): Promise<void> {
-    if (!isWindows || now - this.lastBatteryRefresh < SLOW_INTERVAL_MS) {
+    if (!isWindows || (this.lastBatteryRefresh !== 0 && now - this.lastBatteryRefresh < SLOW_INTERVAL_MS)) {
       return;
     }
 
@@ -1505,7 +1694,7 @@ export class SnapshotService {
   }
 
   private async refreshFans(now: number): Promise<void> {
-    if (!isWindows || now - this.lastFanRefresh < SLOW_INTERVAL_MS) {
+    if (!isWindows || (this.lastFanRefresh !== 0 && now - this.lastFanRefresh < SLOW_INTERVAL_MS)) {
       return;
     }
 
@@ -1514,7 +1703,7 @@ export class SnapshotService {
   }
 
   private async refreshMemoryCache(now: number): Promise<void> {
-    if (!isWindows || now - this.lastMemoryCacheRefresh < FAST_INTERVAL_MS) {
+    if (!isWindows || (this.lastMemoryCacheRefresh !== 0 && now - this.lastMemoryCacheRefresh < FAST_INTERVAL_MS)) {
       return;
     }
 
@@ -1523,7 +1712,7 @@ export class SnapshotService {
   }
 
   private async refreshCpuTemperature(now: number): Promise<void> {
-    if (!isWindows || now - this.lastCpuTemperatureRefresh < SLOW_INTERVAL_MS) {
+    if (!isWindows || (this.lastCpuTemperatureRefresh !== 0 && now - this.lastCpuTemperatureRefresh < SLOW_INTERVAL_MS)) {
       return;
     }
 
@@ -1538,11 +1727,19 @@ export class SnapshotService {
   }
 
   private calculateJitter(): number {
-    if (this.pingSamples.length < 2) {
+    if (this.pingSamples.size() < 2) {
       return this.raw.overview.network.jitterMs.value;
     }
 
-    const deltas = this.pingSamples.slice(1).map((value, index) => Math.abs(value - this.pingSamples[index]));
-    return average(deltas);
+    let totalDelta = 0;
+    for (let index = 1; index < this.pingSamples.size(); index += 1) {
+      const previous = this.pingSamples.at(index - 1);
+      const current = this.pingSamples.at(index);
+      if (previous !== null && current !== null) {
+        totalDelta += Math.abs(current - previous);
+      }
+    }
+
+    return totalDelta / (this.pingSamples.size() - 1);
   }
 }

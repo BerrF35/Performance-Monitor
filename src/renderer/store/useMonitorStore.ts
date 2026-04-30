@@ -17,6 +17,8 @@ const visiblePanels = {
   footer: true
 } satisfies Record<keyof DisplayOverviewCards, boolean>;
 
+let fetchInFlight = false;
+
 interface MonitorState {
   selectedTab: TabId;
   snapshot: PerformanceSnapshot | null;
@@ -42,10 +44,11 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   error: null,
   setTab: (tab) => set({ selectedTab: tab }),
   fetchSnapshot: async () => {
-    if (get().isRefreshing) {
+    if (fetchInFlight || get().isRefreshing) {
       return;
     }
 
+    fetchInFlight = true;
     try {
       const snapshot = await window.performanceMonitor.getSnapshot();
       set({ snapshot, isRefreshing: false, error: null });
@@ -54,6 +57,8 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
         isRefreshing: false,
         error: error instanceof Error ? error.message : 'Unable to refresh metrics'
       });
+    } finally {
+      fetchInFlight = false;
     }
   },
   setRefreshRate: (fastRefreshMs) =>
