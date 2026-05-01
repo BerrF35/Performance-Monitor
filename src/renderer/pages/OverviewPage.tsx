@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   Activity,
@@ -47,17 +47,121 @@ interface OverviewPageProps {
   cards: DisplayOverviewCards;
   visiblePanels: Record<keyof DisplayOverviewCards, boolean>;
   onTogglePanel: (panel: keyof DisplayOverviewCards) => void;
+  onOpenProcesses: () => void;
+  onOpenLogs: () => void;
 }
 
-export function OverviewPage({ cards, visiblePanels, onTogglePanel }: OverviewPageProps) {
+type OverviewPanelId =
+  | 'cpu'
+  | 'gpu'
+  | 'ram'
+  | 'storage'
+  | 'network'
+  | 'powerBattery'
+  | 'thermalsFans'
+  | 'topProcesses'
+  | 'systemHealth'
+  | 'trends'
+  | 'systemInformation';
+
+const panelLabels: Record<OverviewPanelId, string> = {
+  cpu: 'CPU',
+  gpu: 'GPU',
+  ram: 'RAM',
+  storage: 'Storage',
+  network: 'Network',
+  powerBattery: 'Power & Battery',
+  thermalsFans: 'Thermals & Fans',
+  topProcesses: 'Top Processes',
+  systemHealth: 'System Health',
+  trends: 'Trends',
+  systemInformation: 'System Information'
+};
+
+export function OverviewPage({ cards, visiblePanels, onTogglePanel, onOpenProcesses, onOpenLogs }: OverviewPageProps) {
+  const [expandedPanel, setExpandedPanel] = useState<OverviewPanelId | null>(null);
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!expandedPanel) {
+      return;
+    }
+
+    overlayRef.current?.focus();
+  }, [expandedPanel]);
+
+  const closeOverlay = () => setExpandedPanel(null);
+  const handleOverlayKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeOverlay();
+      return;
+    }
+
+    if (event.key !== 'Tab') {
+      return;
+    }
+
+    const focusable = overlayRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusable?.length) {
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  const renderPanel = (panel: OverviewPanelId) => {
+    switch (panel) {
+      case 'cpu':
+        return <CpuCard cpu={cards.cpu} />;
+      case 'gpu':
+        return <GpuCard gpu={cards.gpu} onOpenProcesses={onOpenProcesses} />;
+      case 'ram':
+        return <RamCard ram={cards.ram} />;
+      case 'storage':
+        return <StorageCard storage={cards.storage} />;
+      case 'network':
+        return <NetworkCard network={cards.network} />;
+      case 'powerBattery':
+        return <PowerBatteryCard power={cards.powerBattery} />;
+      case 'thermalsFans':
+        return <ThermalsFansCard thermals={cards.thermalsFans} />;
+      case 'topProcesses':
+        return <TopProcessesCard processes={cards.topProcesses} onOpenProcesses={onOpenProcesses} />;
+      case 'systemHealth':
+        return <SystemHealthCard health={cards.systemHealth} onOpenLogs={onOpenLogs} />;
+      case 'trends':
+        return <TrendsCard trends={cards.trends} />;
+      case 'systemInformation':
+        return <SystemInformationCard info={cards.systemInformation} />;
+    }
+  };
+  const renderCard = (panel: OverviewPanelId) =>
+    visiblePanels[panel] ? (
+      <PanelFrame key={panel} panel={panel} onOpen={() => setExpandedPanel(panel)}>
+        {renderPanel(panel)}
+      </PanelFrame>
+    ) : null;
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-[20px] font-semibold tracking-normal text-ink">System Overview</h1>
-        <div className="flex items-center gap-2">
+        <div className="relative flex items-center gap-2">
           <button
-            onClick={() => reportInteraction('Customize clicked')}
+            onClick={() => setCustomizeOpen((current) => !current)}
             className="no-drag flex h-9 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 text-[12px] text-ink transition hover:bg-white/[0.065]"
+            aria-expanded={customizeOpen}
           >
             <GaugeIcon size={15} />
             Customize
@@ -65,24 +169,97 @@ export function OverviewPage({ cards, visiblePanels, onTogglePanel }: OverviewPa
           <TinyButton title="Panel visibility" onClick={() => onTogglePanel('trends')}>
             <ListChecks size={15} />
           </TinyButton>
+          {customizeOpen ? (
+            <div className="absolute right-0 top-11 z-30 w-[min(320px,calc(100vw-2rem))] rounded-xl border border-white/10 bg-[#0d1828] p-3 shadow-[0_18px_48px_rgba(0,0,0,0.34)]">
+              <p className="mb-2 text-[12px] font-semibold text-ink">Visible Panels</p>
+              <div className="grid grid-cols-2 gap-2">
+                {(Object.keys(panelLabels) as OverviewPanelId[]).map((panel) => (
+                  <button
+                    key={panel}
+                    onClick={() => onTogglePanel(panel)}
+                    className={clsx(
+                      'rounded-lg border px-2 py-1.5 text-left text-[11px] transition',
+                      visiblePanels[panel] ? 'border-cpu/25 bg-cpu/10 text-ink' : 'border-white/10 bg-white/[0.025] text-muted'
+                    )}
+                  >
+                    {panelLabels[panel]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
       <div className="dashboard-grid">
-        {visiblePanels.cpu ? <CpuCard cpu={cards.cpu} /> : null}
-        {visiblePanels.gpu ? <GpuCard gpu={cards.gpu} /> : null}
-        {visiblePanels.ram ? <RamCard ram={cards.ram} /> : null}
-        {visiblePanels.storage ? <StorageCard storage={cards.storage} /> : null}
-        {visiblePanels.network ? <NetworkCard network={cards.network} /> : null}
-        {visiblePanels.powerBattery ? <PowerBatteryCard power={cards.powerBattery} /> : null}
-        {visiblePanels.thermalsFans ? <ThermalsFansCard thermals={cards.thermalsFans} /> : null}
-        {visiblePanels.topProcesses ? <TopProcessesCard processes={cards.topProcesses} /> : null}
-        {visiblePanels.systemHealth ? <SystemHealthCard health={cards.systemHealth} /> : null}
-        {visiblePanels.trends ? <TrendsCard trends={cards.trends} /> : null}
-        {visiblePanels.systemInformation ? <SystemInformationCard info={cards.systemInformation} /> : null}
+        {renderCard('cpu')}
+        {renderCard('gpu')}
+        {renderCard('ram')}
+        {renderCard('storage')}
+        {renderCard('network')}
+        {renderCard('powerBattery')}
+        {renderCard('thermalsFans')}
+        {renderCard('topProcesses')}
+        {renderCard('systemHealth')}
+        {renderCard('trends')}
+        {renderCard('systemInformation')}
       </div>
 
       {visiblePanels.footer ? <FooterStrip cards={cards} /> : null}
+
+      {expandedPanel ? (
+        <div
+          ref={overlayRef}
+          tabIndex={-1}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${panelLabels[expandedPanel]} expanded panel`}
+          onKeyDown={handleOverlayKeyDown}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeOverlay();
+            }
+          }}
+          className="fixed inset-0 z-50 grid place-items-center bg-black/62 p-3 backdrop-blur-[2px]"
+        >
+          <div className="panel-overlay-card scrollbar-dark" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="text-[12px] text-muted">Expanded panel</span>
+              <button onClick={closeOverlay} className="rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-[12px] text-ink transition hover:bg-white/[0.07]">
+                Close
+              </button>
+            </div>
+            {renderPanel(expandedPanel)}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PanelFrame({ panel, onOpen, children }: { panel: OverviewPanelId; onOpen: () => void; children: ReactNode }) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${panelLabels[panel]} panel`}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) {
+          return;
+        }
+
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      className={clsx(
+        'panel-click-target min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-cpu/40',
+        (panel === 'cpu' || panel === 'gpu') && 'dashboard-wide'
+      )}
+    >
+      {children}
     </div>
   );
 }
@@ -140,7 +317,7 @@ function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
   );
 }
 
-function GpuCard({ gpu }: { gpu: DisplayGpuCardModel }) {
+function GpuCard({ gpu, onOpenProcesses }: { gpu: DisplayGpuCardModel; onOpenProcesses: () => void }) {
   return (
     <GlassCard className="dashboard-wide" title="GPU" subtitle={gpu.deviceLabel} icon={Zap} tone="green">
       <div className="grid grid-cols-[minmax(148px,188px)_minmax(0,1fr)_minmax(180px,250px)] gap-4 max-2xl:grid-cols-[minmax(148px,188px)_minmax(0,1fr)] max-lg:grid-cols-1">
@@ -166,7 +343,15 @@ function GpuCard({ gpu }: { gpu: DisplayGpuCardModel }) {
             <Meter label="Encoder Usage" value={gpu.encoderUsage.value} valueLabel={gpu.encoderUsage.label} tone="green" />
           </div>
           <ProcessMiniList title="Top GPU Processes" processes={gpu.topProcesses} value={(process) => process.gpuLabel} />
-          <button onClick={() => reportInteraction('View all GPU processes clicked')} className="text-[12px] text-cpu transition hover:text-white">View all</button>
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenProcesses();
+            }}
+            className="text-[12px] text-cpu transition hover:text-white"
+          >
+            View all
+          </button>
         </div>
       </div>
     </GlassCard>
@@ -176,7 +361,7 @@ function GpuCard({ gpu }: { gpu: DisplayGpuCardModel }) {
 function RamCard({ ram }: { ram: DisplayRamCardModel }) {
   return (
     <GlassCard title="RAM" icon={MemoryStick} tone="purple">
-      <div className="grid grid-cols-[1fr_1fr] gap-4">
+      <div className="grid grid-cols-1 gap-4 min-[520px]:grid-cols-[1fr_1fr]">
         <div>
           <div className="text-[30px] font-semibold leading-none text-ink">{ram.inUse.label}</div>
           <div className="mt-1 flex justify-between text-[11px] text-muted">
@@ -211,7 +396,7 @@ function RamCard({ ram }: { ram: DisplayRamCardModel }) {
 function StorageCard({ storage }: { storage: DisplayStorageCardModel }) {
   return (
     <GlassCard title="Storage" subtitle={storage.deviceLabel} icon={HardDrive} tone="lime">
-      <div className="grid grid-cols-[minmax(0,1fr)_88px] gap-3">
+      <div className="grid grid-cols-1 gap-3 min-[520px]:grid-cols-[minmax(0,1fr)_88px]">
         <div className="grid grid-cols-2 gap-2.5">
           <Stat label="Read Speed" value={storage.readSpeed.label} tone="slate" />
           <Stat label="Write Speed" value={storage.writeSpeed.label} tone="slate" />
@@ -256,20 +441,20 @@ function NetworkCard({ network }: { network: DisplayNetworkCardModel }) {
           <div className="mt-1.5 text-[20px] font-semibold text-gpu">{network.uploadRate.label}</div>
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-4 gap-2.5">
+      <div className="mt-3 grid grid-cols-2 gap-2.5 min-[520px]:grid-cols-4">
         <TinyMetric label="Latency" value={network.latency.label} />
         <TinyMetric label="Jitter" value={network.jitter.label} />
         <TinyMetric label="Packet Loss" value={network.packetLoss.label} />
         <TinyMetric label="Signal" value={network.signal.label} extra={network.signalLabel.label} />
       </div>
-      <div className="mt-4 grid grid-cols-2 gap-4">
+      <div className="mt-4 grid grid-cols-1 gap-4 min-[520px]:grid-cols-2">
         <NetworkUsageList items={network.topUsage} />
         <div>
           <p className="mb-1.5 text-[12px] font-medium text-ink">Live Graph (60 sec)</p>
           <Sparkline data={network.history} tone="blue" secondaryTone="green" height={78} />
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-4 divide-x divide-white/10 rounded-lg border border-white/10 bg-white/[0.022]">
+      <div className="mt-3 grid grid-cols-2 divide-x divide-white/10 rounded-lg border border-white/10 bg-white/[0.022] min-[520px]:grid-cols-4">
         <FooterMetric label="Connections" value={network.connections.label} />
         <FooterMetric label="DNS" value={network.dns.label} />
         <FooterMetric label="IPv4" value={network.ipv4.label} />
@@ -282,7 +467,7 @@ function NetworkCard({ network }: { network: DisplayNetworkCardModel }) {
 function PowerBatteryCard({ power }: { power: DisplayPowerBatteryCardModel }) {
   return (
     <GlassCard title="Power & Battery" icon={BatteryCharging} tone="green" action={<span className={clsx('text-[11px]', toneClass[power.acStatus.tone ?? 'green'].text)}>{power.acStatus.label}</span>}>
-      <div className="grid grid-cols-[1fr_1fr] gap-4">
+      <div className="grid grid-cols-1 gap-4 min-[520px]:grid-cols-[1fr_1fr]">
         <div>
           <div className="text-[30px] font-semibold leading-none text-ink">{power.batteryLevel.label}</div>
           <p className="mt-1 text-[11px] text-muted">Battery Level</p>
@@ -295,7 +480,7 @@ function PowerBatteryCard({ power }: { power: DisplayPowerBatteryCardModel }) {
             <TinyMetric label="Full Charge Capacity" value={power.fullChargeCapacity.label} />
           </div>
         </div>
-        <div className="border-l border-white/10 pl-4">
+        <div className="border-t border-white/10 pt-4 min-[520px]:border-l min-[520px]:border-t-0 min-[520px]:pl-4 min-[520px]:pt-0">
           <p className="text-[11px] text-muted">Total System Power</p>
           <div className="text-[25px] font-semibold text-ink">{power.totalSystemPower.label}</div>
           <Sparkline data={power.powerHistory} tone="green" height={46} />
@@ -317,15 +502,15 @@ function PowerBatteryCard({ power }: { power: DisplayPowerBatteryCardModel }) {
 function ThermalsFansCard({ thermals }: { thermals: DisplayThermalsFansCardModel }) {
   return (
     <GlassCard title="Thermals & Fans" icon={Fan} tone="orange">
-      <div className="grid grid-cols-3 gap-2.5">
+      <div className="grid grid-cols-1 gap-2.5 min-[420px]:grid-cols-3">
         {thermals.sensors.map((sensor) => (
           <TempBox key={sensor.id} sensor={sensor} />
         ))}
       </div>
-      <div className="mt-4 grid grid-cols-[1fr_1fr_1.35fr] gap-3">
+      <div className="mt-4 grid grid-cols-1 gap-3 min-[520px]:grid-cols-[1fr_1fr_1.35fr]">
         <RadialMini label="CPU Fan" value={thermals.cpuFan.label} />
         <RadialMini label="GPU Fan" value={thermals.gpuFan.label} />
-        <div className="border-l border-white/10 pl-3">
+        <div className="border-t border-white/10 pt-3 min-[520px]:border-l min-[520px]:border-t-0 min-[520px]:pl-3 min-[520px]:pt-0">
           <p className="text-[11px] text-muted">Cooling vs Efficiency</p>
           <p className={clsx('mt-1 text-[15px] font-semibold', toneClass[thermals.coolingLabel.tone ?? 'green'].text)}>{thermals.coolingLabel.label}</p>
           <Sparkline data={thermals.coolingHistory} tone="green" height={54} />
@@ -344,7 +529,7 @@ function ThermalsFansCard({ thermals }: { thermals: DisplayThermalsFansCardModel
   );
 }
 
-function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) {
+function TopProcessesCard({ processes, onOpenProcesses }: { processes: DisplayProcessMetric[]; onOpenProcesses: () => void }) {
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
   const selectedProcess = processes.find((process) => process.id === selectedProcessId) ?? null;
 
@@ -360,7 +545,8 @@ function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) 
         {processes.slice(0, 6).map((process) => (
           <button
             key={process.id}
-            onClick={() => {
+            onClick={(event) => {
+              event.stopPropagation();
               setSelectedProcessId(process.id);
               reportInteraction('Process selected', { id: process.id, name: process.name });
             }}
@@ -390,15 +576,23 @@ function TopProcessesCard({ processes }: { processes: DisplayProcessMetric[] }) 
           </div>
         </div>
       ) : null}
-      <button onClick={() => reportInteraction('View all processes clicked')} className="mt-4 h-9 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06] hover:text-white">View All Processes</button>
+      <button
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpenProcesses();
+        }}
+        className="mt-4 h-9 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06] hover:text-white"
+      >
+        View All Processes
+      </button>
     </GlassCard>
   );
 }
 
-function SystemHealthCard({ health }: { health: DisplaySystemHealthCardModel }) {
+function SystemHealthCard({ health, onOpenLogs }: { health: DisplaySystemHealthCardModel; onOpenLogs: () => void }) {
   return (
     <GlassCard title="System Health" icon={ShieldCheck} tone="blue">
-      <div className="grid grid-cols-[1fr_1.2fr] gap-4">
+      <div className="grid grid-cols-1 gap-4 min-[560px]:grid-cols-[1fr_1.2fr]">
         <div className="space-y-2.5">
           {health.items.map((item) => (
             <div key={item.label} className="flex items-start gap-2.5">
@@ -422,7 +616,15 @@ function SystemHealthCard({ health }: { health: DisplaySystemHealthCardModel }) 
             </div>
           ))}
           {!health.recentAlerts.length ? <p className="mt-3 text-[11px] text-muted">No alerts in the current snapshot</p> : null}
-          <button onClick={() => reportInteraction('View all alerts clicked')} className="mt-5 text-[11px] text-cpu hover:text-white">View all alerts</button>
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenLogs();
+            }}
+            className="mt-5 text-[11px] text-cpu hover:text-white"
+          >
+            View all alerts
+          </button>
         </div>
       </div>
     </GlassCard>
@@ -510,6 +712,9 @@ function ChartBlock({ title, data, tone, secondaryTone, yDomain }: { title: stri
 }
 
 function ProcessMiniList({ title, processes, value }: { title: string; processes: DisplayProcessMetric[]; value: (process: DisplayProcessMetric) => string }) {
+  const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
+  const selectedProcess = processes.find((process) => process.id === selectedProcessId) ?? null;
+
   return (
     <div>
       <p className="mb-1.5 text-[12px] font-medium text-ink">{title}</p>
@@ -517,8 +722,15 @@ function ProcessMiniList({ title, processes, value }: { title: string; processes
         {processes.slice(0, 4).map((process) => (
           <button
             key={process.id}
-            onClick={() => reportInteraction('Process selected', { id: process.id, name: process.name })}
-            className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]"
+            onClick={(event) => {
+              event.stopPropagation();
+              setSelectedProcessId(process.id);
+              reportInteraction('Process selected', { id: process.id, name: process.name });
+            }}
+            className={clsx(
+              'flex w-full items-center justify-between gap-3 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]',
+              selectedProcessId === process.id && 'bg-cpu/10 ring-1 ring-cpu/20'
+            )}
           >
             <span className="flex min-w-0 items-center gap-2">
               <ProcessIcon name={process.name} />
@@ -529,17 +741,37 @@ function ProcessMiniList({ title, processes, value }: { title: string; processes
         ))}
         {!processes.length ? <p className="text-[11px] text-muted">No process telemetry available</p> : null}
       </div>
+      {selectedProcess ? (
+        <div className="mt-2 rounded-md border border-cpu/20 bg-cpu/5 px-2 py-1.5 text-[11px] text-muted">
+          <span className="text-ink">{selectedProcess.name}</span>
+          <span className="ml-2">{value(selectedProcess)}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function NetworkUsageList({ items }: { items: Array<{ id: string; name: string; rateLabel: string }> }) {
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const selectedItem = items.find((item) => item.id === selectedItemId) ?? null;
+
   return (
     <div>
       <p className="mb-1.5 text-[12px] font-medium text-ink">Top Network Usage</p>
       <div className="space-y-1.5">
         {items.map((item) => (
-          <button key={item.id} onClick={() => reportInteraction('Network usage row selected', item)} className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]">
+          <button
+            key={item.id}
+            onClick={(event) => {
+              event.stopPropagation();
+              setSelectedItemId(item.id);
+              reportInteraction('Network usage row selected', item);
+            }}
+            className={clsx(
+              'flex w-full items-center justify-between gap-3 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]',
+              selectedItemId === item.id && 'bg-cpu/10 ring-1 ring-cpu/20'
+            )}
+          >
             <span className="flex min-w-0 items-center gap-2">
               <ProcessIcon name={item.name} />
               <span className="truncate text-muted">{item.name}</span>
@@ -549,19 +781,40 @@ function NetworkUsageList({ items }: { items: Array<{ id: string; name: string; 
         ))}
         {!items.length ? <p className="text-[11px] text-muted">No network process telemetry available</p> : null}
       </div>
+      {selectedItem ? (
+        <div className="mt-2 rounded-md border border-cpu/20 bg-cpu/5 px-2 py-1.5 text-[11px] text-muted">
+          <span className="text-ink">{selectedItem.name}</span>
+          <span className="ml-2">{selectedItem.rateLabel}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function ProcessLine({ id, name, value }: { id: string; name: string; value: string }) {
+  const [selected, setSelected] = useState(false);
+
   return (
-    <button onClick={() => reportInteraction('Process selected', { id, name })} className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]">
-      <span className="flex min-w-0 items-center gap-2">
-        <ProcessIcon name={name} />
-        <span className="truncate text-muted">{name}</span>
-      </span>
-      <span className="shrink-0 text-ink">{value}</span>
-    </button>
+    <div>
+      <button
+        onClick={(event) => {
+          event.stopPropagation();
+          setSelected((current) => !current);
+          reportInteraction('Process selected', { id, name });
+        }}
+        className={clsx(
+          'flex w-full items-center justify-between gap-3 rounded-md px-1 py-0.5 text-left text-[12px] transition hover:bg-white/[0.05]',
+          selected && 'bg-cpu/10 ring-1 ring-cpu/20'
+        )}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <ProcessIcon name={name} />
+          <span className="truncate text-muted">{name}</span>
+        </span>
+        <span className="shrink-0 text-ink">{value}</span>
+      </button>
+      {selected ? <div className="mt-1 rounded-md border border-cpu/20 bg-cpu/5 px-2 py-1 text-[10px] text-muted">{name} selected</div> : null}
+    </div>
   );
 }
 

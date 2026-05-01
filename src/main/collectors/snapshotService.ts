@@ -1612,6 +1612,7 @@ export class SnapshotService {
 
       return {
         id: processId(process, index),
+        pid: process.pid,
         name: process.name,
         cpuPercent: process.cpuPercent,
         cpuLabel: displayLabel(source, percentLabel(process.cpuPercent)),

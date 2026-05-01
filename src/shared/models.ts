@@ -255,6 +255,7 @@ export interface DisplayCoreUsage {
 
 export interface DisplayProcessMetric {
   id: string;
+  pid?: number;
   name: string;
   cpuPercent: number;
   cpuLabel: string;

@@ -22,14 +22,17 @@ import {
 import type { LucideProps } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { tabs, type TabId } from '@shared/navigation';
-import type { DisplayOverviewCards, PerformanceSnapshot, StatusChip, TimePoint, Tone, WindowAction } from '@shared/models';
+import type { DisplayOverviewCards, DisplayProcessMetric, PerformanceSnapshot, StatusChip, TimePoint, Tone, WindowAction } from '@shared/models';
 import { useMonitorStore } from '@renderer/store/useMonitorStore';
 import { OverviewPage } from '@renderer/pages/OverviewPage';
 import { GlassCard, MetricRow, Sparkline, TinyButton, toneClass } from '@renderer/components/Primitives';
 import { actionNoticeEvent, notifyAction, type ActionNoticeDetail } from '@renderer/actionNotice';
 
+type TopPanelId = 'menu' | 'notifications' | 'settings' | 'overflow';
+
 export default function App() {
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<TopPanelId | null>(null);
   const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel } = useMonitorStore(
     useShallow((state) => ({
       snapshot: state.snapshot,
@@ -78,13 +81,36 @@ export default function App() {
     return <LoadingShell error={error} onRefresh={fetchSnapshot} />;
   }
 
+  const selectTab = (tab: TabId) => {
+    setTab(tab);
+    setActiveTopPanel(null);
+    notifyAction(`${tab} view selected`);
+  };
+  const toggleTopPanel = (panel: TopPanelId) => {
+    setActiveTopPanel((current) => (current === panel ? null : panel));
+  };
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-app text-ink">
-      <TopBar snapshot={snapshot} />
-      <TabBar selectedTab={selectedTab} onSelect={setTab} snapshot={snapshot} isRefreshing={isRefreshing} onRefresh={fetchSnapshot} />
-      <main className="scrollbar-dark flex-1 overflow-auto px-5 pb-5 pt-4">
+      <TopBar snapshot={snapshot} activePanel={activeTopPanel} onTogglePanel={toggleTopPanel} />
+      <TopActionPanel activePanel={activeTopPanel} snapshot={snapshot} onClose={() => setActiveTopPanel(null)} onSelectTab={selectTab} onRefresh={fetchSnapshot} />
+      <TabBar
+        selectedTab={selectedTab}
+        onSelect={selectTab}
+        snapshot={snapshot}
+        isRefreshing={isRefreshing}
+        onRefresh={fetchSnapshot}
+        onOpenTopPanel={toggleTopPanel}
+      />
+      <main className="scrollbar-dark min-w-0 flex-1 overflow-auto px-3 pb-5 pt-4 sm:px-5">
         {selectedTab === 'Overview' ? (
-          <OverviewPage cards={snapshot.display.overview} visiblePanels={settings.visiblePanels} onTogglePanel={togglePanel} />
+          <OverviewPage
+            cards={snapshot.display.overview}
+            visiblePanels={settings.visiblePanels}
+            onTogglePanel={togglePanel}
+            onOpenProcesses={() => selectTab('Processes')}
+            onOpenLogs={() => selectTab('Logs')}
+          />
         ) : (
           <StubPage tab={selectedTab} cards={snapshot.display.overview} />
         )}
@@ -115,33 +141,48 @@ function LoadingShell({ error, onRefresh }: { error: string | null; onRefresh: (
   );
 }
 
-function TopBar({ snapshot }: { snapshot: PerformanceSnapshot }) {
+function TopBar({
+  snapshot,
+  activePanel,
+  onTogglePanel
+}: {
+  snapshot: PerformanceSnapshot;
+  activePanel: TopPanelId | null;
+  onTogglePanel: (panel: TopPanelId) => void;
+}) {
   return (
-    <header className="app-drag grid min-h-[68px] shrink-0 grid-cols-[minmax(190px,260px)_minmax(280px,1fr)_auto] items-center gap-4 border-b border-white/10 px-5 max-lg:grid-cols-[1fr_auto] max-lg:py-2">
-      <div className="flex min-w-0 items-center gap-3">
+    <header className="app-drag grid min-h-[68px] shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-white/10 px-3 py-2 sm:px-5 xl:grid-cols-[minmax(190px,260px)_minmax(280px,1fr)_auto]">
+      <button
+        onClick={() => onTogglePanel('menu')}
+        className={clsx(
+          'no-drag flex min-w-0 items-center gap-3 rounded-xl px-1.5 py-1.5 text-left transition hover:bg-white/[0.045]',
+          activePanel === 'menu' && 'bg-cpu/10 ring-1 ring-cpu/25'
+        )}
+        aria-expanded={activePanel === 'menu'}
+      >
         <div className="grid size-9 place-items-center rounded-lg bg-cpu text-white shadow-glowBlue">
           <Activity size={20} />
         </div>
         <div className="truncate text-[17px] font-semibold tracking-normal">Performance Monitor</div>
-      </div>
+      </button>
 
-      <div className="grid min-w-0 grid-cols-3 overflow-hidden rounded-xl border border-white/10 bg-white/[0.045] shadow-glass max-lg:order-3 max-lg:col-span-2">
+      <div className="order-3 col-span-2 grid min-w-0 grid-cols-1 overflow-hidden rounded-xl border border-white/10 bg-white/[0.045] shadow-glass sm:grid-cols-3 xl:order-none xl:col-span-1">
         {snapshot.display.chips.map((chip, index) => (
           <StatusChipView key={chip.id} chip={chip} divided={index > 0} />
         ))}
       </div>
 
-      <div className="no-drag flex items-center justify-end gap-2">
-        <TinyButton title="Notifications" onClick={() => notifyAction('Notifications panel opened')}>
+      <div className="no-drag flex min-w-0 items-center justify-end gap-1.5 sm:gap-2">
+        <TinyButton title="Notifications" onClick={() => onTogglePanel('notifications')} className={activePanel === 'notifications' ? 'border-cpu/30 bg-cpu/10 text-ink' : undefined}>
           <span className="relative">
             <Bell size={16} />
             <span className="absolute -right-1 -top-1 size-2 rounded-full bg-red-400" />
           </span>
         </TinyButton>
-        <TinyButton title="Settings" onClick={() => notifyAction('Settings panel opened')}>
+        <TinyButton title="Settings" onClick={() => onTogglePanel('settings')} className={activePanel === 'settings' ? 'border-cpu/30 bg-cpu/10 text-ink' : undefined}>
           <Settings size={16} />
         </TinyButton>
-        <TinyButton title="More" onClick={() => notifyAction('Overflow menu opened')}>
+        <TinyButton title="More" onClick={() => onTogglePanel('overflow')} className={activePanel === 'overflow' ? 'border-cpu/30 bg-cpu/10 text-ink' : undefined}>
           <MoreVertical size={16} />
         </TinyButton>
         <WindowButton action="minimize">
@@ -155,6 +196,107 @@ function TopBar({ snapshot }: { snapshot: PerformanceSnapshot }) {
         </WindowButton>
       </div>
     </header>
+  );
+}
+
+function TopActionPanel({
+  activePanel,
+  snapshot,
+  onClose,
+  onSelectTab,
+  onRefresh
+}: {
+  activePanel: TopPanelId | null;
+  snapshot: PerformanceSnapshot;
+  onClose: () => void;
+  onSelectTab: (tab: TabId) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  if (!activePanel) {
+    return null;
+  }
+
+  const overview = snapshot.display.overview;
+  const isLeftPanel = activePanel === 'menu';
+
+  return (
+    <div className={clsx('no-drag fixed top-[76px] z-50 w-[min(380px,calc(100vw-1.5rem))]', isLeftPanel ? 'left-3 sm:left-5' : 'right-3 sm:right-5')}>
+      <div className="rounded-2xl border border-white/10 bg-[#0d1828] p-3 shadow-[0_18px_48px_rgba(0,0,0,0.38)]">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[13px] font-semibold text-ink">
+              {activePanel === 'menu' ? 'App Menu' : activePanel === 'notifications' ? 'Notifications' : activePanel === 'settings' ? 'Dashboard Settings' : 'More Actions'}
+            </p>
+            <p className="text-[11px] text-muted">Snapshot update: {snapshot.display.updateAgeLabel}</p>
+          </div>
+          <button onClick={onClose} className="grid size-7 place-items-center rounded-lg text-muted transition hover:bg-white/[0.06] hover:text-ink" title="Close panel">
+            <X size={14} />
+          </button>
+        </div>
+
+        {activePanel === 'menu' ? (
+          <div className="grid grid-cols-2 gap-2">
+            {tabs.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => onSelectTab(tab)}
+                className="rounded-lg border border-white/10 bg-white/[0.025] px-3 py-2 text-left text-[12px] text-ink transition hover:bg-white/[0.065]"
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {activePanel === 'notifications' ? (
+          <div className="space-y-2">
+            {overview.systemHealth.recentAlerts.length ? (
+              overview.systemHealth.recentAlerts.map((alert) => (
+                <div key={alert.id} className="rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+                  <p className="text-[12px] font-medium text-ink">{alert.title}</p>
+                  <p className="mt-1 text-[11px] text-muted">{alert.detail}</p>
+                </div>
+              ))
+            ) : (
+              <div className="rounded-lg border border-white/10 bg-white/[0.025] p-3 text-[12px] text-muted">No alerts in the current snapshot.</div>
+            )}
+            <button onClick={() => onSelectTab('Logs')} className="h-8 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06]">
+              Open Logs
+            </button>
+          </div>
+        ) : null}
+
+        {activePanel === 'settings' ? (
+          <div className="space-y-2">
+            <MetricRow label="Refresh Rate" value={`${snapshot.raw.timestamp ? 'Live' : 'Unavailable'}`} />
+            <MetricRow label="CPU Panel" value={overview.cpu.utilization.label} />
+            <MetricRow label="GPU Panel" value={overview.gpu.utilization.label} />
+            <button
+              onClick={() => {
+                void onRefresh();
+              }}
+              className="h-8 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06]"
+            >
+              Refresh Snapshot
+            </button>
+          </div>
+        ) : null}
+
+        {activePanel === 'overflow' ? (
+          <div className="grid gap-2">
+            <button onClick={() => onSelectTab('System')} className="rounded-lg border border-white/10 bg-white/[0.025] px-3 py-2 text-left text-[12px] text-ink transition hover:bg-white/[0.065]">
+              Open System Summary
+            </button>
+            <button onClick={() => onSelectTab('Processes')} className="rounded-lg border border-white/10 bg-white/[0.025] px-3 py-2 text-left text-[12px] text-ink transition hover:bg-white/[0.065]">
+              Open Processes
+            </button>
+            <button onClick={() => onSelectTab('Sensors')} className="rounded-lg border border-white/10 bg-white/[0.025] px-3 py-2 text-left text-[12px] text-ink transition hover:bg-white/[0.065]">
+              Open Sensors
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -196,26 +338,27 @@ function TabBar({
   onSelect,
   snapshot,
   isRefreshing,
-  onRefresh
+  onRefresh,
+  onOpenTopPanel
 }: {
   selectedTab: TabId;
   onSelect: (tab: TabId) => void;
   snapshot: PerformanceSnapshot;
   isRefreshing: boolean;
   onRefresh: () => Promise<void>;
+  onOpenTopPanel: (panel: TopPanelId) => void;
 }) {
   return (
-    <div className="flex h-[48px] shrink-0 items-end justify-between border-b border-white/10 px-5">
-      <nav className="flex h-full items-end gap-6">
+    <div className="flex h-[48px] min-w-0 shrink-0 items-end justify-between gap-3 border-b border-white/10 px-3 sm:px-5">
+      <nav className="scrollbar-dark flex h-full min-w-0 flex-1 items-end gap-5 overflow-x-auto">
         {tabs.map((tab) => (
           <button
             key={tab}
             onClick={() => {
               onSelect(tab);
-              notifyAction(`${tab} view selected`);
             }}
             className={clsx(
-              'relative h-full px-1 pt-4 text-[12px] transition',
+              'relative h-full shrink-0 px-1 pt-4 text-[12px] transition',
               selectedTab === tab ? 'text-ink' : 'text-muted hover:text-ink'
             )}
           >
@@ -224,8 +367,8 @@ function TabBar({
           </button>
         ))}
       </nav>
-      <div className="flex h-full items-center gap-2.5 text-[11px] text-muted">
-        <span>Update: {snapshot.display.updateAgeLabel}</span>
+      <div className="flex h-full shrink-0 items-center gap-1.5 text-[11px] text-muted sm:gap-2.5">
+        <span className="hidden sm:inline">Update: {snapshot.display.updateAgeLabel}</span>
         <button
           onClick={() => {
             notifyAction('Snapshot refresh requested');
@@ -236,10 +379,10 @@ function TabBar({
         >
           <RefreshCw size={15} className={clsx(isRefreshing && 'animate-spin')} />
         </button>
-        <TinyButton title="Grid" onClick={() => notifyAction('Grid control acknowledged')}>
+        <TinyButton title="Grid" onClick={() => onOpenTopPanel('overflow')}>
           <Grid2X2 size={15} />
         </TinyButton>
-        <TinyButton title="Theme" onClick={() => notifyAction('Theme control acknowledged')}>
+        <TinyButton title="Theme" onClick={() => onOpenTopPanel('settings')}>
           <Moon size={15} />
         </TinyButton>
       </div>
@@ -248,6 +391,10 @@ function TabBar({
 }
 
 function StubPage({ tab, cards }: { tab: TabId; cards: DisplayOverviewCards }) {
+  if (tab === 'Processes') {
+    return <ProcessesPage processes={cards.topProcesses} />;
+  }
+
   const panels = getStubPanels(tab, cards);
 
   return (
@@ -273,6 +420,71 @@ function StubPage({ tab, cards }: { tab: TabId; cards: DisplayOverviewCards }) {
           </GlassCard>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function ProcessesPage({ processes }: { processes: DisplayProcessMetric[] }) {
+  const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
+  const selectedProcess = processes.find((process) => process.id === selectedProcessId) ?? processes[0] ?? null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-[20px] font-semibold">Processes</h1>
+        <span className="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1 text-[11px] text-muted">Snapshot-backed process table</span>
+      </div>
+      <div className="glass-card rounded-2xl p-3">
+        <div className="relative z-10 overflow-x-auto">
+          <div className="min-w-[860px]">
+            <div className="grid grid-cols-[minmax(180px,1.4fr)_72px_70px_90px_100px_100px_70px_minmax(110px,1fr)] gap-3 border-b border-white/10 px-2 pb-2 text-[11px] text-muted">
+              <span>Name</span>
+              <span className="text-right">PID</span>
+              <span className="text-right">CPU</span>
+              <span className="text-right">Memory</span>
+              <span className="text-right">Disk</span>
+              <span className="text-right">Network</span>
+              <span className="text-right">GPU</span>
+              <span>GPU engine</span>
+            </div>
+            <div className="mt-1 space-y-1">
+              {processes.map((process) => (
+                <button
+                  key={process.id}
+                  onClick={() => setSelectedProcessId(process.id)}
+                  className={clsx(
+                    'grid w-full grid-cols-[minmax(180px,1.4fr)_72px_70px_90px_100px_100px_70px_minmax(110px,1fr)] items-center gap-3 rounded-lg px-2 py-2 text-left text-[12px] transition hover:bg-white/[0.05]',
+                    selectedProcess?.id === process.id && 'bg-cpu/10 ring-1 ring-cpu/25'
+                  )}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0"><Activity size={13} /></span>
+                    <span className="truncate text-ink">{process.name}</span>
+                  </span>
+                  <span className="text-right text-muted">{process.pid ?? '—'}</span>
+                  <span className="text-right text-muted">{process.cpuLabel}</span>
+                  <span className="text-right text-muted">{process.ramLabel}</span>
+                  <span className="text-right text-muted">{(process.diskReadLabel ?? process.diskWriteLabel) ? `R ${process.diskReadLabel ?? '—'} / W ${process.diskWriteLabel ?? '—'}` : '—'}</span>
+                  <span className="text-right text-muted">{process.networkRateLabel ?? '—'}</span>
+                  <span className="text-right text-muted">{process.gpuLabel}</span>
+                  <span className="truncate text-muted">{process.gpuEngineLabel ?? '—'}</span>
+                </button>
+              ))}
+              {!processes.length ? <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4 text-[12px] text-muted">No process telemetry available yet.</div> : null}
+            </div>
+          </div>
+        </div>
+      </div>
+      {selectedProcess ? (
+        <div className="glass-card rounded-2xl p-4">
+          <div className="relative z-10 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <MetricRow label="Selected Process" value={selectedProcess.name} />
+            <MetricRow label="PID" value={selectedProcess.pid ?? '—'} />
+            <MetricRow label="CPU" value={selectedProcess.cpuLabel} />
+            <MetricRow label="GPU Engine" value={selectedProcess.gpuEngineLabel ?? '—'} />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -332,20 +544,6 @@ function getStubPanels(tab: TabId, cards: DisplayOverviewCards): StubPanel[] {
         ]
       }
     ];
-  }
-
-  if (tab === 'Processes') {
-    return cards.topProcesses.slice(0, 6).map((process) => ({
-      title: process.name,
-      subtitle: process.source,
-      icon: Activity,
-      tone: 'blue' as const,
-      rows: [
-        { label: 'CPU', value: process.cpuLabel },
-        { label: 'RAM', value: process.ramLabel },
-        { label: 'GPU', value: process.gpuLabel }
-      ]
-    }));
   }
 
   if (tab === 'Network') {
