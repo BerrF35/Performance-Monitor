@@ -46,6 +46,8 @@ export interface ProcessMetric {
   cpuPercent: number;
   memoryBytes: number;
   gpuPercent: number;
+  gpuSource?: MetricSource;
+  gpuEngine?: string | null;
   diskReadBytesPerSec?: number;
   diskWriteBytesPerSec?: number;
   networkBytesPerSec?: number;
@@ -259,6 +261,8 @@ export interface DisplayProcessMetric {
   ramLabel: string;
   gpuPercent: number;
   gpuLabel: string;
+  gpuSource?: MetricSource;
+  gpuEngineLabel?: string;
   diskReadLabel?: string;
   diskWriteLabel?: string;
   networkRateLabel?: string;

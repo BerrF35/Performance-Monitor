@@ -25,7 +25,16 @@ import type {
   Tone
 } from '@shared/models';
 import { bytes, createFallbackSnapshot } from './fallbackSnapshot';
-import { type BatteryInfo, type DiskCounterInfo, type FanInfo, type GpuInfo, type NetworkInfo, type ProcessRow, WindowsMetricsAdapter } from './windowsAdapter';
+import {
+  type BatteryInfo,
+  type DiskCounterInfo,
+  type FanInfo,
+  type GpuInfo,
+  type GpuProcessRow,
+  type NetworkInfo,
+  type ProcessRow,
+  WindowsMetricsAdapter
+} from './windowsAdapter';
 
 interface CpuTimes {
   idle: number;
@@ -239,6 +248,7 @@ const DASH = '—';
 const SCHEDULER_INTERVAL_MS = 1000;
 const FAST_INTERVAL_MS = 1000;
 const MEDIUM_INTERVAL_MS = 2500;
+const GPU_PROCESS_INTERVAL_MS = 5000;
 const SLOW_INTERVAL_MS = 12_000;
 const STATIC_INTERVAL_MS = 30_000;
 const PUBLIC_IP_INTERVAL_MS = 90_000;
@@ -493,6 +503,9 @@ export class SnapshotService {
   private pendingGpuProviderSamples = 0;
   private gpuProviderCooldownUntilMs = 0;
   private gpuProcessSource: MetricSource = 'unavailable';
+  private gpuProcessRows: GpuProcessRow[] = [];
+  private readonly gpuProcessByPid = new Map<number, GpuProcessRow>();
+  private lastGpuProcessRefresh = 0;
   private networkInfo: NetworkInfo | null = null;
   private networkRateSource: MetricSource = 'unavailable';
   private diskReadsSinceLaunch = this.raw.overview.footer.totalDataReadBytes.value;
@@ -601,6 +614,7 @@ export class SnapshotService {
         this.refreshStatic(startedMonotonicMs),
         this.refreshProcesses(startedMonotonicMs),
         this.refreshGpu(startedMonotonicMs),
+        this.refreshGpuProcesses(startedMonotonicMs),
         this.refreshDisk(startedMonotonicMs),
         this.refreshNetwork(startedMonotonicMs),
         this.refreshPing(startedMonotonicMs),
@@ -893,8 +907,40 @@ export class SnapshotService {
   }
 
   private buildGpuProcesses(): ProcessMetric[] {
-    this.gpuProcessSource = 'unavailable';
-    return [];
+    if (!this.gpuProcessRows.length) {
+      return [];
+    }
+
+    const processesByPid = new Map<number | undefined, ProcessMetric>();
+    for (const state of this.processStates.values()) {
+      processesByPid.set(state.pid, state.metric);
+    }
+    for (const process of this.processMetrics) {
+      processesByPid.set(process.pid, process);
+    }
+    this.gpuProcessSource = 'live';
+
+    return this.gpuProcessRows
+      .filter((row) => (row.utilizationPercent !== null && row.utilizationPercent > 0) || (row.dedicatedBytes !== null && row.dedicatedBytes > 0))
+      .map((row) => {
+        const process = processesByPid.get(row.pid);
+        return {
+          pid: row.pid,
+          identityKey: process?.identityKey ?? `gpu-${row.pid}`,
+          generation: process?.generation,
+          startTimeMs: process?.startTimeMs,
+          name: process?.name ?? `PID ${row.pid}`,
+          cpuPercent: process?.cpuPercent ?? 0,
+          memoryBytes: process?.memoryBytes ?? row.dedicatedBytes ?? 0,
+          gpuPercent: row.utilizationPercent ?? 0,
+          gpuSource: 'live' as const,
+          gpuEngine: row.engine,
+          diskReadBytesPerSec: process?.diskReadBytesPerSec,
+          diskWriteBytesPerSec: process?.diskWriteBytesPerSec
+        };
+      })
+      .sort((a, b) => b.gpuPercent - a.gpuPercent || b.memoryBytes - a.memoryBytes)
+      .slice(0, 6);
   }
 
   private buildRam(previous: OverviewCards) {
@@ -953,13 +999,7 @@ export class SnapshotService {
       this.diskWritesSinceLaunch += writeBytesPerSec * elapsedSeconds;
     }
 
-    const activeProcess = topProcesses[0] && (topProcesses[0].diskReadBytesPerSec !== undefined || topProcesses[0].diskWriteBytesPerSec !== undefined)
-      ? {
-          name: topProcesses[0].name,
-          readBytesPerSec: topProcesses[0].diskReadBytesPerSec ?? 0,
-          writeBytesPerSec: topProcesses[0].diskWriteBytesPerSec ?? 0
-        }
-      : null;
+    const activeProcess = this.buildStorageActiveProcess(topProcesses);
 
     return {
       ...fallback,
@@ -976,6 +1016,43 @@ export class SnapshotService {
       powerOnHours: metric(this.slowCache.storagePowerOnHours ?? fallback.powerOnHours.value, this.slowCache.storagePowerOnHours !== undefined ? 'live' : lastKnownSource(fallback.powerOnHours)),
       activityHistory: this.histories.storageActivity.push(readSource === 'live' ? readActivity : null, writeSource === 'live' ? writeActivity : null),
       activeProcess
+    };
+  }
+
+  private buildStorageActiveProcess(topProcesses: ProcessMetric[]): StorageProcessMetric | null {
+    let activeProcess: ProcessMetric | null = null;
+    let activeBytesPerSec = 0;
+
+    for (const state of this.processStates.values()) {
+      const readBytesPerSec = state.metric.diskReadBytesPerSec ?? 0;
+      const writeBytesPerSec = state.metric.diskWriteBytesPerSec ?? 0;
+      const totalBytesPerSec = readBytesPerSec + writeBytesPerSec;
+      if (totalBytesPerSec > activeBytesPerSec) {
+        activeBytesPerSec = totalBytesPerSec;
+        activeProcess = state.metric;
+      }
+    }
+
+    if (!activeProcess && topProcesses.length) {
+      for (const process of topProcesses) {
+        const readBytesPerSec = process.diskReadBytesPerSec ?? 0;
+        const writeBytesPerSec = process.diskWriteBytesPerSec ?? 0;
+        const totalBytesPerSec = readBytesPerSec + writeBytesPerSec;
+        if (totalBytesPerSec > activeBytesPerSec) {
+          activeBytesPerSec = totalBytesPerSec;
+          activeProcess = process;
+        }
+      }
+    }
+
+    if (!activeProcess || activeBytesPerSec <= 0) {
+      return null;
+    }
+
+    return {
+      name: activeProcess.name,
+      readBytesPerSec: activeProcess.diskReadBytesPerSec ?? 0,
+      writeBytesPerSec: activeProcess.diskWriteBytesPerSec ?? 0
     };
   }
 
@@ -1348,7 +1425,7 @@ export class SnapshotService {
     const storage = overview.storage;
     const readActivity = round(clamp((storage.readBytesPerSec.value / bytes.gb(1.5)) * 100));
     const writeActivity = round(clamp((storage.writeBytesPerSec.value / bytes.gb(1)) * 100));
-    const activeProcess = storage.activeProcess ? this.displayStorageProcess(storage.activeProcess, 'estimated') : null;
+    const activeProcess = storage.activeProcess ? this.displayStorageProcess(storage.activeProcess, 'live') : null;
     const healthGradeSource: MetricSource = storage.healthGrade === DASH ? 'unavailable' : this.slowCache.storageHealthGrade ? 'live' : sourceOf(storage.healthPercent);
     const hasTbw = sourceOf(storage.tbwBytes) !== 'unavailable';
     const hasTbwLimit = sourceOf(storage.tbwLimitBytes) !== 'unavailable' && storage.tbwLimitBytes.value > 0;
@@ -1530,19 +1607,25 @@ export class SnapshotService {
   }
 
   private displayProcesses(processes: ProcessMetric[], source: MetricSource): DisplayProcessMetric[] {
-    return processes.slice(0, 6).map((process, index) => ({
-      id: processId(process, index),
-      name: process.name,
-      cpuPercent: process.cpuPercent,
-      cpuLabel: displayLabel(source, percentLabel(process.cpuPercent)),
-      ramLabel: displayLabel(source, gbLabel(process.memoryBytes)),
-      gpuPercent: process.gpuPercent,
-      gpuLabel: process.gpuPercent > 0 && source !== 'unavailable' ? percentLabel(process.gpuPercent) : DASH,
-      diskReadLabel: process.diskReadBytesPerSec === undefined ? undefined : storageRateLabel(process.diskReadBytesPerSec),
-      diskWriteLabel: process.diskWriteBytesPerSec === undefined ? undefined : storageRateLabel(process.diskWriteBytesPerSec),
-      networkRateLabel: process.networkBytesPerSec === undefined ? undefined : mbpsLabel(process.networkBytesPerSec),
-      source
-    }));
+    return processes.slice(0, 6).map((process, index) => {
+      const gpuSource = process.gpuSource ?? source;
+
+      return {
+        id: processId(process, index),
+        name: process.name,
+        cpuPercent: process.cpuPercent,
+        cpuLabel: displayLabel(source, percentLabel(process.cpuPercent)),
+        ramLabel: displayLabel(source, gbLabel(process.memoryBytes)),
+        gpuPercent: process.gpuPercent,
+        gpuLabel: displayLabel(gpuSource, percentLabel(process.gpuPercent)),
+        gpuSource,
+        gpuEngineLabel: process.gpuEngine ?? undefined,
+        diskReadLabel: process.diskReadBytesPerSec === undefined ? undefined : storageRateLabel(process.diskReadBytesPerSec),
+        diskWriteLabel: process.diskWriteBytesPerSec === undefined ? undefined : storageRateLabel(process.diskWriteBytesPerSec),
+        networkRateLabel: process.networkBytesPerSec === undefined ? undefined : mbpsLabel(process.networkBytesPerSec),
+        source
+      };
+    });
   }
 
   private async refreshStatic(now: number): Promise<void> {
@@ -1606,7 +1689,12 @@ export class SnapshotService {
       const cpuAverage = existing?.cpuAverage ?? new NumberWindow(SAMPLE_WINDOW);
       const gpuAverage = existing?.gpuAverage ?? new NumberWindow(SAMPLE_WINDOW);
       const firstSeen = existing?.firstSeen ?? now;
+      const gpuRow = this.gpuProcessByPid.get(row.pid);
+      const gpuInstant = gpuRow?.utilizationPercent ?? (this.gpuProcessSource === 'live' ? 0 : null);
       cpuAverage.push(instantCpu);
+      if (gpuInstant !== null) {
+        gpuAverage.push(gpuInstant);
+      }
       const metricRow: ProcessMetric = {
         pid: row.pid,
         identityKey: key,
@@ -1615,7 +1703,11 @@ export class SnapshotService {
         name,
         cpuPercent: movingAverage(cpuAverage),
         memoryBytes: row.workingSetBytes,
-        gpuPercent: movingAverage(gpuAverage)
+        gpuPercent: movingAverage(gpuAverage),
+        gpuSource: gpuInstant === null ? 'unavailable' : this.gpuProcessSource,
+        gpuEngine: gpuRow?.engine ?? null,
+        diskReadBytesPerSec: row.diskReadBytesPerSec ?? undefined,
+        diskWriteBytesPerSec: row.diskWriteBytesPerSec ?? undefined
       };
 
       seenKeys.add(key);
@@ -1928,6 +2020,27 @@ export class SnapshotService {
     this.slowCache.gpuName = mergedGpuInfo.name ?? this.slowCache.gpuName;
   }
 
+  private async refreshGpuProcesses(now: number): Promise<void> {
+    if (!isWindows || (this.lastGpuProcessRefresh !== 0 && now - this.lastGpuProcessRefresh < GPU_PROCESS_INTERVAL_MS)) {
+      return;
+    }
+
+    this.lastGpuProcessRefresh = now;
+    const rows = await this.adapter.getGpuProcesses();
+
+    if (!rows.length) {
+      this.gpuProcessSource = this.gpuProcessRows.length ? 'fallback' : 'unavailable';
+      return;
+    }
+
+    this.gpuProcessRows = rows;
+    this.gpuProcessByPid.clear();
+    for (const row of rows) {
+      this.gpuProcessByPid.set(row.pid, row);
+    }
+    this.gpuProcessSource = 'live';
+  }
+
   private async refreshDisk(now: number): Promise<void> {
     if (!isWindows || (this.lastDiskRefresh !== 0 && now - this.lastDiskRefresh < MEDIUM_INTERVAL_MS)) {
       return;
@@ -1947,6 +2060,8 @@ export class SnapshotService {
     this.networkInfo = info;
     if (signal !== null) {
       this.raw.overview.network.signalDbm = metric(signal, 'live');
+    } else if (sourceOf(this.raw.overview.network.signalDbm) !== 'unavailable') {
+      this.raw.overview.network.signalDbm = metric(this.raw.overview.network.signalDbm.value, 'fallback');
     }
   }
 

@@ -18,6 +18,8 @@ export interface ProcessRow {
   workingSetBytes: number;
   threadCount: number;
   startTimeMs: number | null;
+  diskReadBytesPerSec: number | null;
+  diskWriteBytesPerSec: number | null;
 }
 
 export interface GpuInfo {
@@ -31,6 +33,13 @@ export interface GpuInfo {
   vramUsedBytes: number | null;
   vramTotalBytes: number | null;
   encoderUsagePercent: number | null;
+}
+
+export interface GpuProcessRow {
+  pid: number;
+  utilizationPercent: number | null;
+  engine: string | null;
+  dedicatedBytes: number | null;
 }
 
 export interface StorageInfo {
@@ -132,7 +141,7 @@ function stripPowerShellProgress(stdout: string): string {
 }
 
 async function runPowerShellJson<T>(script: string, timeoutMs = 3500): Promise<T | null> {
-  const command = `$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='SilentlyContinue'; ${script} | ConvertTo-Json -Depth 8 -Compress`;
+  const command = `$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='SilentlyContinue'; ${script.trim()} | ConvertTo-Json -Depth 8 -Compress`;
 
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
@@ -195,8 +204,8 @@ export class WindowsMetricsAdapter {
 
   async getProcesses(): Promise<ProcessRow[]> {
     const raw = await runPowerShellJson<unknown>(
-      'Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64,@{Name="ThreadCount";Expression={$_.Threads.Count}},@{Name="StartTimeUtc";Expression={try {$_.StartTime.ToUniversalTime().ToString("o")} catch {$null}}}',
-      4500
+      '$perf = @{}; Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction SilentlyContinue | Where-Object {$_.IDProcess -gt 0} | ForEach-Object {$perf[[int]$_.IDProcess] = $_}; Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64,@{Name="ThreadCount";Expression={$_.Threads.Count}},@{Name="StartTimeUtc";Expression={try {$_.StartTime.ToUniversalTime().ToString("o")} catch {$null}}},@{Name="IOReadBytesPersec";Expression={if ($perf.ContainsKey([int]$_.Id)) {$perf[[int]$_.Id].IOReadBytesPersec} else {$null}}},@{Name="IOWriteBytesPersec";Expression={if ($perf.ContainsKey([int]$_.Id)) {$perf[[int]$_.Id].IOWriteBytesPersec} else {$null}}}',
+      5500
     );
     const rows = Array.isArray(raw) ? raw : raw ? [raw] : [];
 
@@ -209,7 +218,9 @@ export class WindowsMetricsAdapter {
           cpuSeconds: toNumber(record?.CPU) ?? 0,
           workingSetBytes: toNumber(record?.WorkingSet64) ?? 0,
           threadCount: toNumber(record?.ThreadCount) ?? 0,
-          startTimeMs: typeof record?.StartTimeUtc === 'string' ? Date.parse(record.StartTimeUtc) : null
+          startTimeMs: typeof record?.StartTimeUtc === 'string' ? Date.parse(record.StartTimeUtc) : null,
+          diskReadBytesPerSec: toNumber(record?.IOReadBytesPersec),
+          diskWriteBytesPerSec: toNumber(record?.IOWriteBytesPersec)
         };
       })
       .filter((row) => row.pid > 0 && row.name.trim().length > 0);
@@ -338,6 +349,26 @@ export class WindowsMetricsAdapter {
     };
   }
 
+  async getGpuProcesses(): Promise<GpuProcessRow[]> {
+    const raw = await runPowerShellJson<unknown>(
+      "$engines = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | Select-Object Name,UtilizationPercentage; $memory = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue | Select-Object Name,DedicatedUsage; $rows = @{}; foreach ($engine in $engines) { if ($engine.Name -match 'pid_(\\d+)') { $processIdValue = [int]$Matches[1]; if (-not $rows.ContainsKey($processIdValue)) { $rows[$processIdValue] = [pscustomobject]@{Pid=$processIdValue;Utilization=0.0;Engine=$null;Dedicated=$null;TopEngineUsage=-1.0} }; $usage = if ($null -ne $engine.UtilizationPercentage) { [double]$engine.UtilizationPercentage } else { 0.0 }; $rows[$processIdValue].Utilization += $usage; if ($usage -gt $rows[$processIdValue].TopEngineUsage) { $rows[$processIdValue].TopEngineUsage = $usage; if ($engine.Name -match 'engtype_([^_]+)') { $rows[$processIdValue].Engine = $Matches[1] } } } }; foreach ($item in $memory) { if ($item.Name -match 'pid_(\\d+)') { $processIdValue = [int]$Matches[1]; if (-not $rows.ContainsKey($processIdValue)) { $rows[$processIdValue] = [pscustomobject]@{Pid=$processIdValue;Utilization=$null;Engine=$null;Dedicated=0.0;TopEngineUsage=-1.0} }; $dedicated = if ($null -ne $item.DedicatedUsage) { [double]$item.DedicatedUsage } else { 0.0 }; if ($rows[$processIdValue].Dedicated -eq $null) { $rows[$processIdValue].Dedicated = 0.0 }; $rows[$processIdValue].Dedicated += $dedicated } }; $rows.Values | ForEach-Object {[pscustomobject]@{Pid=$_.Pid;Utilization=if ($_.Utilization -eq $null) {$null} else {[math]::Round([math]::Min(100, [math]::Max(0, $_.Utilization)), 1)};Engine=$_.Engine;Dedicated=if ($_.Dedicated -eq $null) {$null} else {[math]::Round($_.Dedicated, 0)}}}",
+      4500
+    );
+    const rows = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+    return rows
+      .map((row) => {
+        const record = asRecord(row);
+        return {
+          pid: toNumber(record?.Pid) ?? 0,
+          utilizationPercent: toNumber(record?.Utilization),
+          engine: typeof record?.Engine === 'string' && record.Engine.trim() ? record.Engine.trim() : null,
+          dedicatedBytes: toNumber(record?.Dedicated)
+        };
+      })
+      .filter((row) => row.pid > 0);
+  }
+
   async getStorageInfo(): Promise<StorageInfo> {
     const raw = await runPowerShellJson<unknown>(
       "$disk = Get-PhysicalDisk | Select-Object -First 1 FriendlyName,HealthStatus,Size; $rel = $null; try { $rel = Get-PhysicalDisk | Select-Object -First 1 | Get-StorageReliabilityCounter } catch {}; [pscustomobject]@{ Label=$disk.FriendlyName; Health=$disk.HealthStatus; Size=$disk.Size; Temperature=$rel.Temperature; PowerOnHours=$rel.PowerOnHours; Wear=$rel.Wear; HostWrites=$rel.HostWrites }",
@@ -395,11 +426,68 @@ export class WindowsMetricsAdapter {
   }
 
   async getWifiSignalDbm(): Promise<number | null> {
-    const stdout = await runText('netsh', ['wlan', 'show', 'interfaces'], 2500);
-    const match = stdout?.match(/^\s*Signal\s*:\s*(\d+)%/im);
-    const percent = match ? Number.parseInt(match[1], 10) : null;
+    const raw = await runPowerShellJson<unknown>(
+      `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
 
-    return percent === null ? null : Math.round(-100 + percent / 2);
+public static class PerformanceMonitorNativeWifi {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct WLAN_INTERFACE_INFO {
+    public Guid InterfaceGuid;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string strInterfaceDescription;
+    public int isState;
+  }
+
+  [DllImport("wlanapi.dll")] public static extern uint WlanOpenHandle(uint dwClientVersion, IntPtr pReserved, out uint pdwNegotiatedVersion, out IntPtr phClientHandle);
+  [DllImport("wlanapi.dll")] public static extern uint WlanEnumInterfaces(IntPtr hClientHandle, IntPtr pReserved, out IntPtr ppInterfaceList);
+  [DllImport("wlanapi.dll")] public static extern uint WlanQueryInterface(IntPtr hClientHandle, ref Guid pInterfaceGuid, int OpCode, IntPtr pReserved, out uint pdwDataSize, out IntPtr ppData, IntPtr pWlanOpcodeValueType);
+  [DllImport("wlanapi.dll")] public static extern void WlanFreeMemory(IntPtr pMemory);
+  [DllImport("wlanapi.dll")] public static extern uint WlanCloseHandle(IntPtr hClientHandle, IntPtr pReserved);
+}
+"@
+$client = [IntPtr]::Zero
+$version = [uint32]0
+$opened = [PerformanceMonitorNativeWifi]::WlanOpenHandle(2, [IntPtr]::Zero, [ref]$version, [ref]$client)
+$result = $null
+if ($opened -eq 0) {
+  $list = [IntPtr]::Zero
+  $enum = [PerformanceMonitorNativeWifi]::WlanEnumInterfaces($client, [IntPtr]::Zero, [ref]$list)
+  if ($enum -eq 0) {
+    $count = [Runtime.InteropServices.Marshal]::ReadInt32($list, 0)
+    $offset = 8
+    $size = [Runtime.InteropServices.Marshal]::SizeOf([type][PerformanceMonitorNativeWifi+WLAN_INTERFACE_INFO])
+    for ($i = 0; $i -lt $count; $i++) {
+      $ptr = [IntPtr]::Add($list, $offset + ($i * $size))
+      $info = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [type][PerformanceMonitorNativeWifi+WLAN_INTERFACE_INFO])
+      $dataSize = [uint32]0
+      $data = [IntPtr]::Zero
+      $query = [PerformanceMonitorNativeWifi]::WlanQueryInterface($client, [ref]$info.InterfaceGuid, 0x10000102, [IntPtr]::Zero, [ref]$dataSize, [ref]$data, [IntPtr]::Zero)
+      if ($query -eq 0 -and $data -ne [IntPtr]::Zero) {
+        $rssi = [Runtime.InteropServices.Marshal]::ReadInt32($data)
+        if ($rssi -le 0 -and $rssi -ge -120) {
+          $result = $rssi
+        }
+      }
+      if ($data -ne [IntPtr]::Zero) {
+        [PerformanceMonitorNativeWifi]::WlanFreeMemory($data)
+      }
+      if ($result -ne $null) {
+        break
+      }
+    }
+    [PerformanceMonitorNativeWifi]::WlanFreeMemory($list)
+  }
+  [PerformanceMonitorNativeWifi]::WlanCloseHandle($client, [IntPtr]::Zero) | Out-Null
+}
+$result
+      `,
+      3500
+    );
+    const signal = toNumber(raw);
+
+    return signal !== null && signal <= 0 && signal >= -120 ? signal : null;
   }
 
   async getPingInfo(host: string): Promise<PingInfo> {
@@ -436,7 +524,7 @@ export class WindowsMetricsAdapter {
 
   async getBatteryInfo(): Promise<BatteryInfo> {
     const raw = await runPowerShellJson<unknown>(
-      "$battery = Get-CimInstance Win32_Battery | Select-Object -First 1; $full = Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity | Select-Object -First 1; $design = Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData | Select-Object -First 1; $cycles = Get-CimInstance -Namespace root/wmi -ClassName BatteryCycleCount | Select-Object -First 1; $result = if ($battery) { [pscustomobject]@{Level=$battery.EstimatedChargeRemaining;Status=$battery.BatteryStatus;Remaining=$battery.EstimatedRunTime;Full=$full.FullChargedCapacity;Design=$design.DesignedCapacity;Cycles=$cycles.CycleCount} } else { [pscustomobject]@{Level=$null;Status=$null;Remaining=$null;Full=$null;Design=$null;Cycles=$null} }; $result",
+      "$battery = Get-CimInstance Win32_Battery | Select-Object -First 1; $portable = Get-CimInstance Win32_PortableBattery -ErrorAction SilentlyContinue | Select-Object -First 1; $full = Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue | Select-Object -First 1; $design = Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData -ErrorAction SilentlyContinue | Select-Object -First 1; $cycles = Get-CimInstance -Namespace root/wmi -ClassName BatteryCycleCount -ErrorAction SilentlyContinue | Select-Object -First 1; $level = if ($battery -and $null -ne $battery.EstimatedChargeRemaining) { $battery.EstimatedChargeRemaining } elseif ($portable) { $portable.EstimatedChargeRemaining } else { $null }; $remaining = if ($battery -and $null -ne $battery.EstimatedRunTime) { $battery.EstimatedRunTime } elseif ($portable) { $portable.EstimatedRunTime } else { $null }; $fullCapacity = if ($full -and $null -ne $full.FullChargedCapacity) { $full.FullChargedCapacity } elseif ($portable) { $portable.FullChargeCapacity } else { $null }; $designCapacity = if ($design -and $null -ne $design.DesignedCapacity) { $design.DesignedCapacity } elseif ($portable) { $portable.DesignCapacity } else { $null }; $result = if ($battery -or $portable) { [pscustomobject]@{Level=$level;Status=$battery.BatteryStatus;Remaining=$remaining;Full=$fullCapacity;Design=$designCapacity;Cycles=$cycles.CycleCount} } else { [pscustomobject]@{Level=$null;Status=$null;Remaining=$null;Full=$null;Design=$null;Cycles=$null} }; $result",
       4000
     );
     const record = firstRecord(raw);
