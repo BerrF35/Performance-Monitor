@@ -21,6 +21,51 @@ body {
   background: #050b16;
 }
 
+.theme-light {
+  color-scheme: light;
+  background:
+    radial-gradient(circle at top left, rgba(47, 129, 255, 0.1), transparent 30%),
+    linear-gradient(180deg, #f7f4ed 0%, #ebe7dd 100%);
+}
+
+.theme-light .bg-app,
+.theme-light.bg-app {
+  background:
+    radial-gradient(circle at top left, rgba(47, 129, 255, 0.1), transparent 30%),
+    linear-gradient(180deg, #f7f4ed 0%, #ebe7dd 100%);
+}
+
+.theme-light .text-ink {
+  color: #1f2937;
+}
+
+.theme-light .text-muted {
+  color: #5f6b7a;
+}
+
+.theme-light .glass-card {
+  border-color: rgba(95, 107, 122, 0.22);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(244, 241, 234, 0.96)),
+    #f6f2ea;
+  box-shadow: 0 10px 28px rgba(34, 48, 69, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.theme-light .glass-card::before {
+  opacity: 0.04;
+}
+
+.theme-light .border-white\/10 {
+  border-color: rgba(95, 107, 122, 0.18);
+}
+
+.theme-light .bg-white\/\[0\.025\],
+.theme-light .bg-white\/\[0\.03\],
+.theme-light .bg-white\/\[0\.035\],
+.theme-light .bg-white\/\[0\.045\] {
+  background-color: rgba(255, 255, 255, 0.52);
+}
+
 html,
 #root {
   height: 100%;

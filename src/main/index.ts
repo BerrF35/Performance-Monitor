@@ -36,6 +36,7 @@ function createWindow(): void {
 }
 
 ipcMain.handle('metrics:get-snapshot', async () => snapshotService.getSnapshot());
+ipcMain.handle('metrics:force-snapshot', async () => snapshotService.forceRefresh());
 
 ipcMain.handle('window:action', (event, action: WindowAction) => {
   const window = BrowserWindow.fromWebContents(event.sender);

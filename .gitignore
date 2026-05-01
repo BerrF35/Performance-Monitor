@@ -78,6 +78,8 @@ out
 out/
 dist
 dist/
+bin/
+obj/
 release/
 .vite/
 .nuxt

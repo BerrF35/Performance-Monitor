@@ -22,7 +22,7 @@ import {
 import type { LucideProps } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { tabs, type TabId } from '@shared/navigation';
-import type { DisplayOverviewCards, DisplayProcessMetric, PerformanceSnapshot, StatusChip, TimePoint, Tone, WindowAction } from '@shared/models';
+import type { DisplayOverviewCards, DisplayProcessMetric, GraphWindow, PerformanceSnapshot, StatusChip, TimePoint, Tone, WindowAction } from '@shared/models';
 import { useMonitorStore } from '@renderer/store/useMonitorStore';
 import { OverviewPage } from '@renderer/pages/OverviewPage';
 import { GlassCard, MetricRow, Sparkline, TinyButton, toneClass } from '@renderer/components/Primitives';
@@ -33,7 +33,7 @@ type TopPanelId = 'menu' | 'notifications' | 'settings' | 'overflow';
 export default function App() {
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [activeTopPanel, setActiveTopPanel] = useState<TopPanelId | null>(null);
-  const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel } = useMonitorStore(
+  const { snapshot, selectedTab, settings, isRefreshing, error, setTab, fetchSnapshot, togglePanel, toggleTheme, setGraphWindow } = useMonitorStore(
     useShallow((state) => ({
       snapshot: state.snapshot,
       selectedTab: state.selectedTab,
@@ -42,7 +42,9 @@ export default function App() {
       error: state.error,
       setTab: state.setTab,
       fetchSnapshot: state.fetchSnapshot,
-      togglePanel: state.togglePanel
+      togglePanel: state.togglePanel,
+      toggleTheme: state.toggleTheme,
+      setGraphWindow: state.setGraphWindow
     }))
   );
 
@@ -91,22 +93,25 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-app text-ink">
+    <div className={clsx('flex h-screen flex-col overflow-hidden bg-app text-ink', settings.theme === 'light' ? 'theme-light' : 'theme-dark')}>
       <TopBar snapshot={snapshot} activePanel={activeTopPanel} onTogglePanel={toggleTopPanel} />
-      <TopActionPanel activePanel={activeTopPanel} snapshot={snapshot} onClose={() => setActiveTopPanel(null)} onSelectTab={selectTab} onRefresh={fetchSnapshot} />
+      <TopActionPanel activePanel={activeTopPanel} snapshot={snapshot} theme={settings.theme} onToggleTheme={toggleTheme} onClose={() => setActiveTopPanel(null)} onSelectTab={selectTab} onRefresh={() => fetchSnapshot(true)} />
       <TabBar
         selectedTab={selectedTab}
         onSelect={selectTab}
         snapshot={snapshot}
         isRefreshing={isRefreshing}
-        onRefresh={fetchSnapshot}
+        onRefresh={() => fetchSnapshot(true)}
         onOpenTopPanel={toggleTopPanel}
+        onToggleTheme={toggleTheme}
       />
       <main className="scrollbar-dark min-w-0 flex-1 overflow-auto px-3 pb-5 pt-4 sm:px-5">
         {selectedTab === 'Overview' ? (
           <OverviewPage
             cards={snapshot.display.overview}
             visiblePanels={settings.visiblePanels}
+            graphWindow={settings.graphWindow}
+            onSetGraphWindow={setGraphWindow}
             onTogglePanel={togglePanel}
             onOpenProcesses={() => selectTab('Processes')}
             onOpenLogs={() => selectTab('Logs')}
@@ -202,12 +207,16 @@ function TopBar({
 function TopActionPanel({
   activePanel,
   snapshot,
+  theme,
+  onToggleTheme,
   onClose,
   onSelectTab,
   onRefresh
 }: {
   activePanel: TopPanelId | null;
   snapshot: PerformanceSnapshot;
+  theme: 'dark' | 'light';
+  onToggleTheme: () => void;
   onClose: () => void;
   onSelectTab: (tab: TabId) => void;
   onRefresh: () => Promise<void>;
@@ -271,6 +280,13 @@ function TopActionPanel({
             <MetricRow label="Refresh Rate" value={`${snapshot.raw.timestamp ? 'Live' : 'Unavailable'}`} />
             <MetricRow label="CPU Panel" value={overview.cpu.utilization.label} />
             <MetricRow label="GPU Panel" value={overview.gpu.utilization.label} />
+            <MetricRow label="Theme" value={theme === 'dark' ? 'Dark' : 'Light'} />
+            <button
+              onClick={onToggleTheme}
+              className="h-8 w-full rounded-lg border border-white/10 bg-white/[0.025] text-[12px] text-cpu transition hover:bg-white/[0.06]"
+            >
+              Toggle Theme
+            </button>
             <button
               onClick={() => {
                 void onRefresh();
@@ -339,7 +355,8 @@ function TabBar({
   snapshot,
   isRefreshing,
   onRefresh,
-  onOpenTopPanel
+  onOpenTopPanel,
+  onToggleTheme
 }: {
   selectedTab: TabId;
   onSelect: (tab: TabId) => void;
@@ -347,6 +364,7 @@ function TabBar({
   isRefreshing: boolean;
   onRefresh: () => Promise<void>;
   onOpenTopPanel: (panel: TopPanelId) => void;
+  onToggleTheme: () => void;
 }) {
   return (
     <div className="flex h-[48px] min-w-0 shrink-0 items-end justify-between gap-3 border-b border-white/10 px-3 sm:px-5">
@@ -382,7 +400,7 @@ function TabBar({
         <TinyButton title="Grid" onClick={() => onOpenTopPanel('overflow')}>
           <Grid2X2 size={15} />
         </TinyButton>
-        <TinyButton title="Theme" onClick={() => onOpenTopPanel('settings')}>
+        <TinyButton title="Theme" onClick={onToggleTheme}>
           <Moon size={15} />
         </TinyButton>
       </div>
@@ -392,7 +410,7 @@ function TabBar({
 
 function StubPage({ tab, cards }: { tab: TabId; cards: DisplayOverviewCards }) {
   if (tab === 'Processes') {
-    return <ProcessesPage processes={cards.topProcesses} />;
+    return <ProcessesPage processes={cards.processes.length ? cards.processes : cards.topProcesses} />;
   }
 
   const panels = getStubPanels(tab, cards);

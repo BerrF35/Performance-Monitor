@@ -57,6 +57,11 @@ export function createFallbackSnapshot(now = Date.now()): RawSnapshot {
       processes: 0
     },
     gpu: {
+      id: 'gpu-unavailable',
+      adapterIndex: 0,
+      vendor: 'unknown',
+      provider: 'unavailable',
+      luid: null,
       deviceLabel: UNAVAILABLE,
       utilizationPercent: unavailableMetric(0),
       coreClockGhz: unavailableMetric(0),
@@ -71,6 +76,7 @@ export function createFallbackSnapshot(now = Date.now()): RawSnapshot {
       status: UNAVAILABLE,
       topProcesses: []
     },
+    gpus: [],
     ram: {
       inUsePercent: 0,
       usedBytes: 0,
@@ -135,6 +141,7 @@ export function createFallbackSnapshot(now = Date.now()): RawSnapshot {
       noiseLevelDba: unavailableMetric<number | null>(null),
       noiseHistory: emptyHistory
     },
+    processes: [],
     topProcesses: [],
     systemHealth: {
       overallStatus: UNAVAILABLE,

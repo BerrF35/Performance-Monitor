@@ -33,6 +33,7 @@ import type {
   DisplayThermalSensor,
   DisplayThermalsFansCardModel,
   DisplayTrendsCardModel,
+  GraphWindow,
   TimePoint,
   Tone
 } from '@shared/models';
@@ -46,6 +47,8 @@ const reportInteraction = (action: string, detail?: unknown) => {
 interface OverviewPageProps {
   cards: DisplayOverviewCards;
   visiblePanels: Record<keyof DisplayOverviewCards, boolean>;
+  graphWindow: GraphWindow;
+  onSetGraphWindow: (graphWindow: GraphWindow) => void;
   onTogglePanel: (panel: keyof DisplayOverviewCards) => void;
   onOpenProcesses: () => void;
   onOpenLogs: () => void;
@@ -78,10 +81,12 @@ const panelLabels: Record<OverviewPanelId, string> = {
   systemInformation: 'System Information'
 };
 
-export function OverviewPage({ cards, visiblePanels, onTogglePanel, onOpenProcesses, onOpenLogs }: OverviewPageProps) {
+export function OverviewPage({ cards, visiblePanels, graphWindow, onSetGraphWindow, onTogglePanel, onOpenProcesses, onOpenLogs }: OverviewPageProps) {
   const [expandedPanel, setExpandedPanel] = useState<OverviewPanelId | null>(null);
   const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [selectedGpuId, setSelectedGpuId] = useState<string | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const selectedGpu = cards.gpus.find((gpu) => gpu.id === selectedGpuId) ?? cards.gpu;
 
   useEffect(() => {
     if (!expandedPanel) {
@@ -123,19 +128,19 @@ export function OverviewPage({ cards, visiblePanels, onTogglePanel, onOpenProces
   const renderPanel = (panel: OverviewPanelId) => {
     switch (panel) {
       case 'cpu':
-        return <CpuCard cpu={cards.cpu} />;
+        return <CpuCard cpu={cards.cpu} graphWindow={graphWindow} onSetGraphWindow={onSetGraphWindow} />;
       case 'gpu':
-        return <GpuCard gpu={cards.gpu} onOpenProcesses={onOpenProcesses} />;
+        return <GpuCard gpu={selectedGpu} gpus={cards.gpus} selectedGpuId={selectedGpu.id} onSelectGpu={setSelectedGpuId} graphWindow={graphWindow} onSetGraphWindow={onSetGraphWindow} onOpenProcesses={onOpenProcesses} />;
       case 'ram':
-        return <RamCard ram={cards.ram} />;
+        return <RamCard ram={cards.ram} graphWindow={graphWindow} />;
       case 'storage':
-        return <StorageCard storage={cards.storage} />;
+        return <StorageCard storage={cards.storage} graphWindow={graphWindow} onSetGraphWindow={onSetGraphWindow} />;
       case 'network':
-        return <NetworkCard network={cards.network} />;
+        return <NetworkCard network={cards.network} graphWindow={graphWindow} />;
       case 'powerBattery':
-        return <PowerBatteryCard power={cards.powerBattery} />;
+        return <PowerBatteryCard power={cards.powerBattery} graphWindow={graphWindow} />;
       case 'thermalsFans':
-        return <ThermalsFansCard thermals={cards.thermalsFans} />;
+        return <ThermalsFansCard thermals={cards.thermalsFans} graphWindow={graphWindow} />;
       case 'topProcesses':
         return <TopProcessesCard processes={cards.topProcesses} onOpenProcesses={onOpenProcesses} />;
       case 'systemHealth':
@@ -264,7 +269,7 @@ function PanelFrame({ panel, onOpen, children }: { panel: OverviewPanelId; onOpe
   );
 }
 
-function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
+function CpuCard({ cpu, graphWindow, onSetGraphWindow }: { cpu: DisplayCpuCardModel; graphWindow: GraphWindow; onSetGraphWindow: (graphWindow: GraphWindow) => void }) {
   return (
     <GlassCard className="dashboard-wide" title="CPU" subtitle={cpu.deviceLabel} icon={Cpu} tone="blue">
       <div className="grid grid-cols-[minmax(148px,188px)_minmax(0,1fr)] gap-4 max-md:grid-cols-1">
@@ -304,7 +309,7 @@ function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
         </div>
       </div>
 
-      <ChartBlock title="Utilization Over Time (60 sec)" tone="blue" data={cpu.utilizationHistory} />
+      <ChartBlock title="Utilization Over Time" tone="blue" data={cpu.utilizationHistoryWindows[graphWindow]} graphWindow={graphWindow} onSetGraphWindow={onSetGraphWindow} />
 
       <div className="mt-2.5 grid grid-cols-5 divide-x divide-white/10 rounded-lg border border-white/10 bg-white/[0.022] max-lg:grid-cols-3">
         <FooterMetric label="Load" value={cpu.load.label} />
@@ -317,9 +322,49 @@ function CpuCard({ cpu }: { cpu: DisplayCpuCardModel }) {
   );
 }
 
-function GpuCard({ gpu, onOpenProcesses }: { gpu: DisplayGpuCardModel; onOpenProcesses: () => void }) {
+function GpuCard({
+  gpu,
+  gpus,
+  selectedGpuId,
+  onSelectGpu,
+  graphWindow,
+  onSetGraphWindow,
+  onOpenProcesses
+}: {
+  gpu: DisplayGpuCardModel;
+  gpus: DisplayGpuCardModel[];
+  selectedGpuId: string;
+  onSelectGpu: (id: string) => void;
+  graphWindow: GraphWindow;
+  onSetGraphWindow: (graphWindow: GraphWindow) => void;
+  onOpenProcesses: () => void;
+}) {
+  const [showAllGpuProcesses, setShowAllGpuProcesses] = useState(false);
+
   return (
-    <GlassCard className="dashboard-wide" title="GPU" subtitle={gpu.deviceLabel} icon={Zap} tone="green">
+    <GlassCard
+      className="dashboard-wide"
+      title="GPU"
+      subtitle={gpu.deviceLabel}
+      icon={Zap}
+      tone="green"
+      action={
+        gpus.length > 1 ? (
+          <select
+            value={selectedGpuId}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => onSelectGpu(event.target.value)}
+            className="no-drag max-w-[220px] rounded-lg border border-white/10 bg-white/[0.035] px-2 py-1 text-[11px] text-ink outline-none"
+          >
+            {gpus.map((item) => (
+              <option key={item.id} value={item.id}>
+                GPU{item.adapterIndex} {item.vendor.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        ) : null
+      }
+    >
       <div className="grid grid-cols-[minmax(148px,188px)_minmax(0,1fr)_minmax(180px,250px)] gap-4 max-2xl:grid-cols-[minmax(148px,188px)_minmax(0,1fr)] max-lg:grid-cols-1">
         <Gauge value={gpu.utilization.value} valueLabel={gpu.utilization.label} label="Utilization" tone="green" size={186} />
         <div className="space-y-2.5">
@@ -329,7 +374,7 @@ function GpuCard({ gpu, onOpenProcesses }: { gpu: DisplayGpuCardModel; onOpenPro
             <PlainStat label="Power Draw" value={gpu.powerDraw.label} />
             <PlainStat label="Temperature" value={gpu.temperature.label} />
           </div>
-          <ChartBlock title="Frametime (ms)" tone="green" data={gpu.frametimeHistory} yDomain={[0, 50]} />
+          <ChartBlock title="Frametime (ms)" tone="green" data={gpu.frametimeHistoryWindows[graphWindow]} graphWindow={graphWindow} onSetGraphWindow={onSetGraphWindow} yDomain={[0, 50]} />
           <div className="flex items-center gap-2 text-[12px]">
             <span className="size-2 rounded-full bg-warn" />
             <span className="text-muted">Status</span>
@@ -342,23 +387,34 @@ function GpuCard({ gpu, onOpenProcesses }: { gpu: DisplayGpuCardModel; onOpenPro
             <Meter label="VRAM Usage" value={gpu.vramUsagePercent.value} valueLabel={gpu.vramUsagePercent.label} tone="green" rightLabel={gpu.vramUsage.label} />
             <Meter label="Encoder Usage" value={gpu.encoderUsage.value} valueLabel={gpu.encoderUsage.label} tone="green" />
           </div>
-          <ProcessMiniList title="Top GPU Processes" processes={gpu.topProcesses} value={(process) => process.gpuLabel} />
+          <ProcessMiniList title={showAllGpuProcesses ? 'All GPU Processes' : 'Top GPU Processes'} processes={gpu.topProcesses} value={(process) => process.gpuLabel} limit={showAllGpuProcesses ? 64 : 4} />
           <button
             onClick={(event) => {
               event.stopPropagation();
-              onOpenProcesses();
+              setShowAllGpuProcesses((current) => !current);
             }}
             className="text-[12px] text-cpu transition hover:text-white"
           >
-            View all
+            {showAllGpuProcesses ? 'Show top' : 'View all'}
           </button>
+          {showAllGpuProcesses ? (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenProcesses();
+              }}
+              className="block text-[12px] text-muted transition hover:text-white"
+            >
+              Open process table
+            </button>
+          ) : null}
         </div>
       </div>
     </GlassCard>
   );
 }
 
-function RamCard({ ram }: { ram: DisplayRamCardModel }) {
+function RamCard({ ram, graphWindow }: { ram: DisplayRamCardModel; graphWindow: GraphWindow }) {
   return (
     <GlassCard title="RAM" icon={MemoryStick} tone="purple">
       <div className="grid grid-cols-1 gap-4 min-[520px]:grid-cols-[1fr_1fr]">
@@ -388,12 +444,12 @@ function RamCard({ ram }: { ram: DisplayRamCardModel }) {
         <span className="text-[12px] font-medium text-ink">Memory Trend (60 min)</span>
         <span className={clsx('inline-flex items-center gap-1 text-[11px]', toneClass[ram.stability.tone ?? 'green'].text)}><CheckCircle2 size={12} /> {ram.stability.label}</span>
       </div>
-      <Sparkline data={ram.trendHistory} tone="purple" height={76} area />
+      <Sparkline data={ram.trendHistoryWindows[graphWindow]} tone="purple" height={76} area />
     </GlassCard>
   );
 }
 
-function StorageCard({ storage }: { storage: DisplayStorageCardModel }) {
+function StorageCard({ storage, graphWindow, onSetGraphWindow }: { storage: DisplayStorageCardModel; graphWindow: GraphWindow; onSetGraphWindow: (graphWindow: GraphWindow) => void }) {
   return (
     <GlassCard title="Storage" subtitle={storage.deviceLabel} icon={HardDrive} tone="lime">
       <div className="grid grid-cols-1 gap-3 min-[520px]:grid-cols-[minmax(0,1fr)_88px]">
@@ -416,7 +472,7 @@ function StorageCard({ storage }: { storage: DisplayStorageCardModel }) {
           </div>
         </div>
       </div>
-      <ChartBlock title="Disk Activity (60 sec)" tone="blue" secondaryTone="purple" data={storage.activityHistory} />
+      <ChartBlock title="Disk Activity" tone="blue" secondaryTone="purple" data={storage.activityHistoryWindows[graphWindow]} graphWindow={graphWindow} onSetGraphWindow={onSetGraphWindow} />
       {storage.activeProcess ? (
         <div className="mt-2.5 text-[11px] text-muted">
           <p>Active Process</p>
@@ -428,7 +484,7 @@ function StorageCard({ storage }: { storage: DisplayStorageCardModel }) {
   );
 }
 
-function NetworkCard({ network }: { network: DisplayNetworkCardModel }) {
+function NetworkCard({ network, graphWindow }: { network: DisplayNetworkCardModel; graphWindow: GraphWindow }) {
   return (
     <GlassCard title="Network" subtitle={network.adapterLabel} icon={Network} tone="cyan">
       <div className="grid grid-cols-2 gap-3">
@@ -451,7 +507,7 @@ function NetworkCard({ network }: { network: DisplayNetworkCardModel }) {
         <NetworkUsageList items={network.topUsage} />
         <div>
           <p className="mb-1.5 text-[12px] font-medium text-ink">Live Graph (60 sec)</p>
-          <Sparkline data={network.history} tone="blue" secondaryTone="green" height={78} />
+          <Sparkline data={network.historyWindows[graphWindow]} tone="blue" secondaryTone="green" height={78} />
         </div>
       </div>
       <div className="mt-3 grid grid-cols-2 divide-x divide-white/10 rounded-lg border border-white/10 bg-white/[0.022] min-[520px]:grid-cols-4">
@@ -464,7 +520,7 @@ function NetworkCard({ network }: { network: DisplayNetworkCardModel }) {
   );
 }
 
-function PowerBatteryCard({ power }: { power: DisplayPowerBatteryCardModel }) {
+function PowerBatteryCard({ power, graphWindow }: { power: DisplayPowerBatteryCardModel; graphWindow: GraphWindow }) {
   return (
     <GlassCard title="Power & Battery" icon={BatteryCharging} tone="green" action={<span className={clsx('text-[11px]', toneClass[power.acStatus.tone ?? 'green'].text)}>{power.acStatus.label}</span>}>
       <div className="grid grid-cols-1 gap-4 min-[520px]:grid-cols-[1fr_1fr]">
@@ -483,7 +539,7 @@ function PowerBatteryCard({ power }: { power: DisplayPowerBatteryCardModel }) {
         <div className="border-t border-white/10 pt-4 min-[520px]:border-l min-[520px]:border-t-0 min-[520px]:pl-4 min-[520px]:pt-0">
           <p className="text-[11px] text-muted">Total System Power</p>
           <div className="text-[25px] font-semibold text-ink">{power.totalSystemPower.label}</div>
-          <Sparkline data={power.powerHistory} tone="green" height={46} />
+          <Sparkline data={power.powerHistoryWindows[graphWindow]} tone="green" height={46} />
           <div className="grid grid-cols-2 gap-2.5">
             <TinyMetric label="CPU" value={power.cpuPower.label} />
             <TinyMetric label="GPU" value={power.gpuPower.label} />
@@ -499,7 +555,7 @@ function PowerBatteryCard({ power }: { power: DisplayPowerBatteryCardModel }) {
   );
 }
 
-function ThermalsFansCard({ thermals }: { thermals: DisplayThermalsFansCardModel }) {
+function ThermalsFansCard({ thermals, graphWindow }: { thermals: DisplayThermalsFansCardModel; graphWindow: GraphWindow }) {
   return (
     <GlassCard title="Thermals & Fans" icon={Fan} tone="orange">
       <div className="grid grid-cols-1 gap-2.5 min-[420px]:grid-cols-3">
@@ -513,7 +569,7 @@ function ThermalsFansCard({ thermals }: { thermals: DisplayThermalsFansCardModel
         <div className="border-t border-white/10 pt-3 min-[520px]:border-l min-[520px]:border-t-0 min-[520px]:pl-3 min-[520px]:pt-0">
           <p className="text-[11px] text-muted">Cooling vs Efficiency</p>
           <p className={clsx('mt-1 text-[15px] font-semibold', toneClass[thermals.coolingLabel.tone ?? 'green'].text)}>{thermals.coolingLabel.label}</p>
-          <Sparkline data={thermals.coolingHistory} tone="green" height={54} />
+          <Sparkline data={thermals.coolingHistoryWindows[graphWindow]} tone="green" height={54} />
         </div>
       </div>
       <div className="mt-3 flex items-end justify-between gap-3">
@@ -522,7 +578,7 @@ function ThermalsFansCard({ thermals }: { thermals: DisplayThermalsFansCardModel
           <p className="mt-1 text-[18px] font-semibold text-gpu">{thermals.noiseLevel.label}</p>
         </div>
         <div className="flex-1">
-          <Sparkline data={thermals.noiseHistory} tone="green" height={34} yDomain={[20, 50]} />
+          <Sparkline data={thermals.noiseHistoryWindows[graphWindow]} tone="green" height={34} yDomain={[20, 50]} />
         </div>
       </div>
     </GlassCard>
@@ -695,23 +751,49 @@ function FooterStrip({ cards }: { cards: DisplayOverviewCards }) {
   );
 }
 
-function ChartBlock({ title, data, tone, secondaryTone, yDomain }: { title: string; data: TimePoint[]; tone: Tone; secondaryTone?: Tone; yDomain?: [number, number] }) {
+function ChartBlock({
+  title,
+  data,
+  tone,
+  secondaryTone,
+  graphWindow,
+  onSetGraphWindow,
+  yDomain
+}: {
+  title: string;
+  data: TimePoint[];
+  tone: Tone;
+  secondaryTone?: Tone;
+  graphWindow: GraphWindow;
+  onSetGraphWindow: (graphWindow: GraphWindow) => void;
+  yDomain?: [number, number];
+}) {
   return (
     <div className="mt-3">
-      <p className="mb-1 text-[12px] font-medium text-ink">{title}</p>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <p className="text-[12px] font-medium text-ink">{title}</p>
+        <select
+          value={graphWindow}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => onSetGraphWindow(event.target.value as GraphWindow)}
+          className="no-drag rounded-md border border-white/10 bg-white/[0.035] px-1.5 py-0.5 text-[10px] text-muted outline-none"
+        >
+          <option value="30s">30s</option>
+          <option value="60s">60s</option>
+          <option value="5min">5min</option>
+          <option value="15min">15min</option>
+        </select>
+      </div>
       <Sparkline data={data} tone={tone} secondaryTone={secondaryTone} height={72} yDomain={yDomain} />
       <div className="mt-0.5 flex justify-between text-[9px] text-muted">
-        <span>60 sec</span>
-        <span>45 sec</span>
-        <span>30 sec</span>
-        <span>15 sec</span>
-        <span>0 sec</span>
+        <span>{graphWindow}</span>
+        <span>0</span>
       </div>
     </div>
   );
 }
 
-function ProcessMiniList({ title, processes, value }: { title: string; processes: DisplayProcessMetric[]; value: (process: DisplayProcessMetric) => string }) {
+function ProcessMiniList({ title, processes, value, limit = 4 }: { title: string; processes: DisplayProcessMetric[]; value: (process: DisplayProcessMetric) => string; limit?: number }) {
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
   const selectedProcess = processes.find((process) => process.id === selectedProcessId) ?? null;
 
@@ -719,7 +801,7 @@ function ProcessMiniList({ title, processes, value }: { title: string; processes
     <div>
       <p className="mb-1.5 text-[12px] font-medium text-ink">{title}</p>
       <div className="space-y-1.5">
-        {processes.slice(0, 4).map((process) => (
+        {processes.slice(0, limit).map((process) => (
           <button
             key={process.id}
             onClick={(event) => {

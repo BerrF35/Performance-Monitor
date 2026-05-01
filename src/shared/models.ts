@@ -1,6 +1,10 @@
-export type MetricSource = 'live' | 'adapter' | 'estimated' | 'fallback' | 'unavailable';
+export type MetricSource = 'live' | 'adapter' | 'fallback' | 'unavailable';
 
 export type Tone = 'green' | 'blue' | 'purple' | 'orange' | 'cyan' | 'lime' | 'yellow' | 'red' | 'slate';
+
+export type GpuVendor = 'nvidia' | 'intel' | 'unknown';
+
+export type GraphWindow = '30s' | '60s' | '5min' | '15min';
 
 export interface MetricValue<T> {
   value: T;
@@ -20,6 +24,8 @@ export interface TimePoint {
   value: number;
   secondary?: number;
 }
+
+export type HistoryWindowSeries = Record<GraphWindow, TimePoint[]>;
 
 export interface StatusChip {
   id: string;
@@ -48,6 +54,9 @@ export interface ProcessMetric {
   gpuPercent: number;
   gpuSource?: MetricSource;
   gpuEngine?: string | null;
+  gpuLuid?: string | null;
+  gpuDedicatedBytes?: number;
+  gpuSharedBytes?: number;
   diskReadBytesPerSec?: number;
   diskWriteBytesPerSec?: number;
   networkBytesPerSec?: number;
@@ -71,6 +80,11 @@ export interface CpuCardModel {
 }
 
 export interface GpuCardModel {
+  id: string;
+  adapterIndex: number;
+  vendor: GpuVendor;
+  provider: 'nvml' | 'wmi' | 'lhm' | 'unavailable';
+  luid?: string | null;
   deviceLabel: string;
   utilizationPercent: MetricValue<number>;
   coreClockGhz: MetricValue<number>;
@@ -222,11 +236,13 @@ export interface FooterSummaryModel {
 export interface OverviewCards {
   cpu: CpuCardModel;
   gpu: GpuCardModel;
+  gpus: GpuCardModel[];
   ram: RamCardModel;
   storage: StorageCardModel;
   network: NetworkCardModel;
   powerBattery: PowerBatteryCardModel;
   thermalsFans: ThermalsFansCardModel;
+  processes: ProcessMetric[];
   topProcesses: ProcessMetric[];
   systemHealth: SystemHealthCardModel;
   trends: TrendsCardModel;
@@ -264,6 +280,8 @@ export interface DisplayProcessMetric {
   gpuLabel: string;
   gpuSource?: MetricSource;
   gpuEngineLabel?: string;
+  gpuDedicatedMemoryLabel?: string;
+  gpuSharedMemoryLabel?: string;
   diskReadLabel?: string;
   diskWriteLabel?: string;
   networkRateLabel?: string;
@@ -308,6 +326,7 @@ export interface DisplayCpuCardModel {
   eCoreUsageAveragePercent: DisplayMetric<number>;
   perCoreUsage: DisplayCoreUsage[];
   utilizationHistory: TimePoint[];
+  utilizationHistoryWindows: HistoryWindowSeries;
   status: DisplayMetric<string>;
   load: DisplayMetric<number>;
   pCoreAverage: DisplayMetric<number>;
@@ -317,6 +336,11 @@ export interface DisplayCpuCardModel {
 }
 
 export interface DisplayGpuCardModel {
+  id: string;
+  adapterIndex: number;
+  vendor: GpuVendor;
+  provider: 'nvml' | 'wmi' | 'lhm' | 'unavailable';
+  luid?: string | null;
   deviceLabel: string;
   utilization: DisplayMetric<number>;
   coreClock: DisplayMetric<number>;
@@ -328,6 +352,7 @@ export interface DisplayGpuCardModel {
   vramUsage: DisplayMetric<string>;
   encoderUsage: DisplayMetric<number>;
   frametimeHistory: TimePoint[];
+  frametimeHistoryWindows: HistoryWindowSeries;
   status: DisplayMetric<string>;
   topProcesses: DisplayProcessMetric[];
 }
@@ -342,6 +367,7 @@ export interface DisplayRamCardModel {
   freePercent: DisplayMetric<number>;
   topProcesses: DisplayMemoryProcessMetric[];
   trendHistory: TimePoint[];
+  trendHistoryWindows: HistoryWindowSeries;
   stability: DisplayMetric<string>;
 }
 
@@ -359,6 +385,7 @@ export interface DisplayStorageCardModel {
   tbw: DisplayMetric<string>;
   powerOnHours: DisplayMetric<number>;
   activityHistory: TimePoint[];
+  activityHistoryWindows: HistoryWindowSeries;
   activeProcess: DisplayStorageProcessMetric | null;
 }
 
@@ -373,6 +400,7 @@ export interface DisplayNetworkCardModel {
   signalLabel: DisplayMetric<string>;
   topUsage: DisplayNetworkUsageMetric[];
   history: TimePoint[];
+  historyWindows: HistoryWindowSeries;
   connections: DisplayMetric<number>;
   dns: DisplayMetric<string>;
   ipv4: DisplayMetric<string>;
@@ -390,6 +418,7 @@ export interface DisplayPowerBatteryCardModel {
   gpuPower: DisplayMetric<number>;
   estimatedRemaining: DisplayMetric<number | null>;
   powerHistory: TimePoint[];
+  powerHistoryWindows: HistoryWindowSeries;
 }
 
 export interface DisplayThermalSensor {
@@ -406,8 +435,10 @@ export interface DisplayThermalsFansCardModel {
   coolingEfficiency: DisplayMetric<number>;
   coolingLabel: DisplayMetric<string>;
   coolingHistory: TimePoint[];
+  coolingHistoryWindows: HistoryWindowSeries;
   noiseLevel: DisplayMetric<number | null>;
   noiseHistory: TimePoint[];
+  noiseHistoryWindows: HistoryWindowSeries;
 }
 
 export interface DisplaySystemHealthCardModel {
@@ -452,11 +483,13 @@ export interface DisplayFooterSummaryModel {
 export interface DisplayOverviewCards {
   cpu: DisplayCpuCardModel;
   gpu: DisplayGpuCardModel;
+  gpus: DisplayGpuCardModel[];
   ram: DisplayRamCardModel;
   storage: DisplayStorageCardModel;
   network: DisplayNetworkCardModel;
   powerBattery: DisplayPowerBatteryCardModel;
   thermalsFans: DisplayThermalsFansCardModel;
+  processes: DisplayProcessMetric[];
   topProcesses: DisplayProcessMetric[];
   systemHealth: DisplaySystemHealthCardModel;
   trends: DisplayTrendsCardModel;
@@ -481,7 +514,8 @@ export interface PerformanceSnapshot {
 }
 
 export interface MonitorSettings {
-  theme: 'dark';
+  theme: 'dark' | 'light';
+  graphWindow: GraphWindow;
   fastRefreshMs: number;
   slowRefreshMs: number;
   visiblePanels: Record<keyof DisplayOverviewCards, boolean>;
@@ -491,5 +525,6 @@ export type WindowAction = 'minimize' | 'maximize' | 'close';
 
 export interface PerformanceMonitorApi {
   getSnapshot: () => Promise<PerformanceSnapshot>;
+  forceSnapshot: () => Promise<PerformanceSnapshot>;
   windowAction: (action: WindowAction) => Promise<void>;
 }
